@@ -67,6 +67,34 @@ def test_recall_injection_is_not_original_speech(deployment, monkeypatch):
     assert 'SECRET_RECALLED_BODY' not in json.dumps(rows(settings))
 
 
+def test_kelivo_conversations_keep_archive_and_recall_cooldown_separate(deployment, monkeypatch):
+    from serein.chat_state import recent_deliveries
+    settings, client = deployment
+    configure(client).raise_for_status()
+    monkeypatch.setattr('serein.configured_models.memory_ready', lambda _: True)
+    cooldowns = []
+    def recall(*args, **options):
+        cooldowns.append(options['delivered_ids'])
+        return {'context': 'Synthetic remembered source',
+                'selected_refs': [f'scene:fixture-{len(cooldowns)}'], 'cards': []}
+    monkeypatch.setattr('serein.application.Services.recall', recall)
+    respond(monkeypatch)
+    for window, question in [('kelivo-a', 'Same first question'),
+                             ('kelivo-b', 'Same first question'),
+                             ('kelivo-a', 'Next question')]:
+        client.post('/v1/chat/completions', headers={'X-Conversation-Id': window}, json={
+            'messages': [{'role': 'user', 'content': question}],
+            'serein': {'memory': True}}).raise_for_status()
+    assert cooldowns == [[], [], ['scene:fixture-1']]
+    assert [(row['session_id'], row['role']) for row in rows(settings)] == [
+        ('kelivo-a', 'user'), ('kelivo-a', 'assistant'),
+        ('kelivo-b', 'user'), ('kelivo-b', 'assistant'),
+        ('kelivo-a', 'user'), ('kelivo-a', 'assistant')]
+    assert recent_deliveries(settings.database, 'kelivo-a') == ['scene:fixture-3', 'scene:fixture-1']
+    assert recent_deliveries(settings.database, 'kelivo-b') == ['scene:fixture-2']
+    assert recent_deliveries(settings.database, 'main') == []
+
+
 def test_retry_restart_tools_and_regeneration(deployment, monkeypatch):
     settings, client = deployment
     configure(client)

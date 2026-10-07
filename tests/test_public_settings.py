@@ -479,6 +479,15 @@ def test_memory_selection_and_success_receipt(deployment,monkeypatch):
     ({'X-Serein-Window-ID': 'explicit'}, {}, 'explicit'),
     ({'X-Ombre-Session-Id': 'old-client'}, {}, 'old-client'),
     ({'X-Serein-Window-ID': 'header'}, {'window_id': 'body'}, 'body'),
+    ({'X-Conversation-Id': ' kelivo-chat '}, {}, 'kelivo-chat'),
+    ({'X-Conversation-Id': '   '}, {}, 'main'),
+    ({'X-Serein-Window-ID': ' ', 'X-Ombre-Session-Id': ' ', 'X-Conversation-Id': 'kelivo-chat'},
+     {'window_id': ' '}, 'kelivo-chat'),
+    ({'X-Serein-Window-ID': 'serein-chat', 'X-Ombre-Session-Id': 'old-client',
+      'X-Conversation-Id': 'kelivo-chat'}, {}, 'serein-chat'),
+    ({'X-Ombre-Session-Id': 'old-client', 'X-Conversation-Id': 'kelivo-chat'}, {}, 'old-client'),
+    ({'X-Serein-Window-ID': 'header', 'X-Conversation-Id': 'kelivo-chat'}, {'window_id': 'body'}, 'body'),
+    ({'X-Serein-Window-ID': 'explicit', 'X-Conversation-Id': 'x' * 201}, {}, 'explicit'),
 ])
 def test_window_fallback_memory_and_optional_feature_rounds(deployment, monkeypatch, headers, options, expected):
     from serein.chat_features import current_round
@@ -511,11 +520,17 @@ def test_window_fallback_memory_and_optional_feature_rounds(deployment, monkeypa
     assert all(row['window_id'] == expected for row in ledger)
 
 
-def test_explicit_window_length_is_still_validated(deployment):
+@pytest.mark.parametrize('headers,options', [
+    ({}, {'window_id': 'x' * 201}),
+    ({'X-Serein-Window-ID': 'x' * 201}, {}),
+    ({'X-Ombre-Session-Id': 'x' * 201}, {}),
+    ({'X-Conversation-Id': 'x' * 201}, {}),
+])
+def test_explicit_window_length_is_still_validated(deployment, headers, options):
     _, client = deployment
     configure(client)
-    response = client.post('/v1/chat/completions', json={'messages': [{'role':'user','content':'hello'}],
-        'serein': {'window_id':'x' * 201}})
+    response = client.post('/v1/chat/completions', headers=headers,
+        json={'messages': [{'role':'user','content':'hello'}], 'serein': options})
     assert response.status_code == 400
 
 

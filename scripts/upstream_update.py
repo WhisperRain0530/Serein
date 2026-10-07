@@ -57,7 +57,7 @@ def safe_name(name):
         raise ValueError('源码清单含不兼容的文件名')
     if path.parts[0].lower() == 'data' or any(p.lower() in DENIED for p in path.parts) or path.suffix.lower() in ('.db', '.sqlite', '.sqlite3', '.log'):
         raise ValueError('源码清单包含实例数据或配置')
-    if path.parts[0] == 'deploy' and name not in ('deploy/compose.yaml', 'deploy/Gateway.Dockerfile'):
+    if path.parts[0] == 'deploy' and name not in ('deploy/compose.yaml', 'deploy/Gateway.Dockerfile', 'deploy/Zeabur.Dockerfile'):
         raise ValueError('源码清单包含未允许的部署文件')
     return name
 

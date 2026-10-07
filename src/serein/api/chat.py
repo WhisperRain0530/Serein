@@ -134,10 +134,11 @@ def routes(settings, services, auth):
 
     @router.post('/v1/chat/completions')
     async def chat(body: dict, background_tasks: BackgroundTasks, x_serein_window_id: str = Header(default=''),
-                   x_ombre_session_id: str = Header(default='')):
+                   x_ombre_session_id: str = Header(default=''), x_conversation_id: str = Header(default='')):
         observation = ChatObservation(settings.database)
         try:
-            return await run_chat(body, background_tasks, x_serein_window_id, x_ombre_session_id, observation)
+            return await run_chat(body, background_tasks, x_serein_window_id, x_ombre_session_id,
+                                  x_conversation_id, observation)
         except asyncio.CancelledError:
             observation.finish('interrupted', reason='client_disconnected')
             raise
@@ -148,7 +149,7 @@ def routes(settings, services, auth):
             observation.finish('failed', reason='request_failed')
             raise
 
-    async def run_chat(body, background_tasks, x_serein_window_id, x_ombre_session_id, observation):
+    async def run_chat(body, background_tasks, x_serein_window_id, x_ombre_session_id, x_conversation_id, observation):
         body = deepcopy(body)
         options = body.pop('serein', {})
         incoming = body.get('messages')
@@ -164,7 +165,7 @@ def routes(settings, services, auth):
         if type(use_memory) is not bool:
             raise HTTPException(400, 'memory must be boolean')
         window_id = next((str(value).strip() for value in
-            (options.get('window_id'), x_serein_window_id, x_ombre_session_id)
+            (options.get('window_id'), x_serein_window_id, x_ombre_session_id, x_conversation_id)
             if value is not None and str(value).strip()), 'main')
         if len(window_id)>200:
             raise HTTPException(400, 'Window ID must be at most 200 characters')

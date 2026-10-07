@@ -23,7 +23,8 @@ test('gateway separates web auth from API auth, saves settings and streams respo
   const requests=[];
   const core=http.createServer((req,res)=>{
     if(req.url==='/health'){res.setHeader('Content-Type','application/json');res.end('{"status":"ok"}');return;}
-    requests.push({path:req.url,auth:req.headers.authorization,method:req.method,forwardedHost:req.headers['x-forwarded-host'],forwardedProto:req.headers['x-forwarded-proto'],protocol:req.headers['mcp-protocol-version']});
+    requests.push({path:req.url,auth:req.headers.authorization,method:req.method,forwardedHost:req.headers['x-forwarded-host'],forwardedProto:req.headers['x-forwarded-proto'],protocol:req.headers['mcp-protocol-version'],
+      conversationId:req.headers['x-conversation-id'],windowId:req.headers['x-serein-window-id'],sessionId:req.headers['x-ombre-session-id']});
     if(req.url.startsWith('/.well-known/oauth-') || ['/authorize','/token','/register'].includes(req.url)){
       res.writeHead(req.url==='/register'?201:200,{'Content-Type':'application/json'});res.end('{"oauth":true}');return;
     }
@@ -282,10 +283,15 @@ test('gateway separates web auth from API auth, saves settings and streams respo
       }
       assert.equal((await fetch(base+path,{method:'POST',headers:{Authorization:'Bearer synthetic-api-key',Origin:'https://foreign.invalid'},body:'{}'})).status,403);
     }
-    const stream=await fetch(base+'/v1/chat/completions',{method:'POST',headers:{Authorization:'Bearer synthetic-api-key','Content-Type':'application/json'},body:'{"stream":true}'});
+    const stream=await fetch(base+'/v1/chat/completions',{method:'POST',headers:{Authorization:'Bearer synthetic-api-key','Content-Type':'application/json',
+      'X-Conversation-Id':'kelivo-chat','X-Serein-Window-ID':'serein-chat','X-Ombre-Session-Id':'old-client'},body:'{"stream":true}'});
     const reader=stream.body.getReader();const first=new TextDecoder().decode((await reader.read()).value);
     assert.ok(first.includes('part')&&!first.includes('[DONE]'));
     const second=new TextDecoder().decode((await reader.read()).value);assert.ok(second.includes('[DONE]'));
+    const forwardedChat=requests.findLast(r=>r.path==='/v1/chat/completions');
+    assert.equal(forwardedChat.conversationId,'kelivo-chat');
+    assert.equal(forwardedChat.windowId,'serein-chat');
+    assert.equal(forwardedChat.sessionId,'old-client');
     writeFileSync(join(dir,'auth.json'),record('password-two'));
     assert.equal((await fetch(base,{headers:auth})).status,401);
     assert.equal((await fetch(base,{headers:{Authorization:basic('password-two')}})).status,200);
