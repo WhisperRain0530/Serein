@@ -198,3 +198,49 @@ def test_healthcheck_uses_gateway_ready_endpoint(monkeypatch):
     monkeypatch.setattr(runtime, 'http_ready', lambda url:(seen.append(url), True)[1])
     assert runtime.main(['healthcheck']) == 0
     assert seen == ['http://127.0.0.1:8080/ready']
+
+
+def test_codex_worker_has_dedicated_home_and_no_api_fallback(tmp_path):
+    source = {'CODEX_HOME':'unrelated', 'OPENAI_API_KEY':'synthetic-secret',
+              'CODEX_API_KEY':'synthetic-other', 'OPENAI_BASE_URL':'https://unrelated.example',
+              'SEREIN_AGENT_TOKEN':'synthetic-other-token'}
+    env = runtime.codex_environment(tmp_path, source)
+    assert Path(env['CODEX_HOME']) == tmp_path / 'codex-worker' / 'auth'
+    assert env['SEREIN_AGENT_URL'] == 'http://127.0.0.1:8011'
+    assert Path(env['SEREIN_AGENT_TOKEN_FILE']) == tmp_path / 'secrets' / 'api-token'
+    for key in ('OPENAI_API_KEY', 'CODEX_API_KEY', 'OPENAI_BASE_URL', 'SEREIN_AGENT_TOKEN'):
+        assert key not in env
+    core_env = runtime.runtime_environment(tmp_path, source)
+    for key in runtime.CODEX_AUTH_ENV:
+        assert key not in core_env
+    assert source['CODEX_HOME'] == 'unrelated'
+
+
+def test_worker_exit_does_not_restart_chat_services(tmp_path, monkeypatch, capsys):
+    core, gateway, worker = Child(), Child(), Child(2)
+    launched = []
+    children = iter((core, gateway, worker))
+    def launch(command, **options):
+        launched.append((command, options))
+        return next(children)
+    class StopAfter:
+        count = 0
+        def wait(self, _seconds):
+            self.count += 1
+            return self.count >= 3
+    monkeypatch.setattr(runtime.subprocess, 'Popen', launch)
+    monkeypatch.setattr(runtime, 'wait_for_core', lambda *_:True)
+    assert runtime.supervise(tmp_path, StopAfter(), env={'SEREIN_CODEX_WORKER_ENABLED':'1'}) == 0
+    assert len(launched) == 3
+    assert launched[2][0][1].endswith('codex_event_worker.py')
+    assert 'CODEX_HOME' not in launched[0][1]['env']
+    assert Path(launched[2][1]['env']['CODEX_HOME']) == tmp_path / 'codex-worker' / 'auth'
+    assert 'Chat remains available' in capsys.readouterr().out
+
+
+def test_status_redacts_diagnostics_and_does_not_accept_api_login(tmp_path, monkeypatch):
+    monkeypatch.setattr(runtime.subprocess, 'run', lambda *a, **k:
+                        subprocess.CompletedProcess(a, 0, '', 'Logged in using an API key: synthetic-secret'))
+    status = runtime.codex_status(tmp_path, {})
+    assert status == {'subscription_authenticated':False, 'worker':{}}
+    assert 'synthetic-secret' not in json.dumps(status)

@@ -18,6 +18,8 @@ from urllib.request import build_opener, ProxyHandler
 ROOT = Path(__file__).resolve().parents[1]
 MEMORY_PORT = 8011
 PREVIEW_PORT = 4173
+CODEX_AUTH_ENV = ('CODEX_HOME', 'CODEX_API_KEY', 'OPENAI_API_KEY', 'OPENAI_ACCESS_TOKEN',
+                  'CODEX_ACCESS_TOKEN', 'OPENAI_BASE_URL')
 
 
 def _write_private_once(path, text):
@@ -102,6 +104,8 @@ def gateway_port(env):
 def runtime_environment(data_dir, env):
     data_dir = Path(data_dir).resolve()
     result = dict(env)
+    for key in CODEX_AUTH_ENV:
+        result.pop(key, None)
     # Always use this volume's credentials, never an unrelated inherited token.
     result.pop('SEREIN_HTTP_TOKEN', None)
     result.pop('SEREIN_MEMORY_TOKEN', None)
@@ -115,6 +119,48 @@ def runtime_environment(data_dir, env):
         SEREIN_ROUTE_DRAFT_FILE=str(data_dir / 'semantic-route-draft.json'),
         SEREIN_MIGRATION_PATH_ROOT=str(data_dir / 'legacy-input'))
     return result
+
+
+def codex_environment(data_dir, env):
+    """Dedicated subscription login; never inherit API credentials or desktop config."""
+    state = Path(data_dir).resolve() / 'codex-worker'
+    for directory in (state, state / 'auth', state / 'work'):
+        if directory.is_symlink():
+            raise RuntimeError('Codex worker directories must not be symbolic links.')
+        directory.mkdir(exist_ok=True, mode=0o700)
+        if os.name != 'nt':
+            directory.chmod(0o700)
+    result = dict(env)
+    for key in CODEX_AUTH_ENV:
+        result.pop(key, None)
+    result.update(CODEX_HOME=str(state / 'auth'),
+                  SEREIN_AGENT_URL=f'http://127.0.0.1:{MEMORY_PORT}',
+                  SEREIN_AGENT_TOKEN_FILE=str(Path(data_dir).resolve() / 'secrets' / 'api-token'),
+                  PYTHONUNBUFFERED='1', PYTHONUTF8='1')
+    result.pop('SEREIN_AGENT_TOKEN', None)
+    return result
+
+
+def codex_command(*args):
+    return ['codex', '-c', 'cli_auth_credentials_store="file"',
+            '-c', 'forced_login_method="chatgpt"', *args]
+
+
+def codex_status(data_dir, env):
+    child_env = codex_environment(data_dir, env)
+    result = subprocess.run(codex_command('login', 'status'), env=child_env,
+                            capture_output=True, text=True, timeout=20)
+    # Do not forward raw diagnostics, account identifiers or credential values.
+    authenticated = result.returncode == 0 and 'chatgpt' in (result.stdout + result.stderr).lower()
+    status_path = Path(data_dir) / 'codex-worker' / 'status.json'
+    state = {}
+    if status_path.is_file() and not status_path.is_symlink():
+        try:
+            saved = json.loads(status_path.read_text('utf-8'))
+            state = {key:saved[key] for key in ('state', 'updated_at', 'retry_at', 'last_error', 'model') if key in saved}
+        except (ValueError, OSError, TypeError):
+            pass
+    return {'subscription_authenticated':authenticated, 'worker':state}
 
 
 def http_ready(url):
@@ -153,7 +199,8 @@ def stop_children(children):
 
 
 def supervise(data_dir, stop, *, root=ROOT, env=None):
-    child_env = runtime_environment(data_dir, os.environ if env is None else env)
+    source_env = os.environ if env is None else env
+    child_env = runtime_environment(data_dir, source_env)
     commands = [
         [sys.executable, '-m', 'serein.launch', '--config', str(Path(data_dir) / 'config.toml'),
          'http', '--live', '--host', '127.0.0.1', '--port', str(MEMORY_PORT)],
@@ -166,13 +213,27 @@ def supervise(data_dir, stop, *, root=ROOT, env=None):
         if not wait_for_core(core, stop):
             return 0
         children.append(subprocess.Popen(commands[1], cwd=root, env=child_env))
+        worker = None
+        restart_after = 0.0
+        worker_enabled = source_env.get('SEREIN_CODEX_WORKER_ENABLED', '').lower() in ('1', 'true', 'yes')
+        worker_env = codex_environment(data_dir, source_env) if worker_enabled else None
+        worker_command = [sys.executable, str(root / 'scripts' / 'codex_event_worker.py'),
+                          '--state-dir', str(Path(data_dir).resolve() / 'codex-worker')]
         print('Serein started; connection credentials are available through the explicit credentials command.', flush=True)
         while not stop.wait(.25):
-            for name, child in zip(('Memory', 'Gateway'), children):
+            for name, child in zip(('Memory', 'Gateway'), children[:2]):
                 code = child.poll()
                 if code is not None:
                     print(f'{name} service exited; stopping this instance for restart.', file=sys.stderr, flush=True)
                     return 1
+            if worker_enabled:
+                if worker is not None and worker.poll() is not None:
+                    print('Codex worker stopped; retrying separately in 60 seconds. Chat remains available.', flush=True)
+                    worker = None
+                    restart_after = time.monotonic() + 60
+                if worker is None and time.monotonic() >= restart_after:
+                    worker = subprocess.Popen(worker_command, cwd=root, env=worker_env)
+                    children.append(worker)
         return 0
     finally:
         stop_children(children)
@@ -180,10 +241,17 @@ def supervise(data_dir, stop, *, root=ROOT, env=None):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', nargs='?', default='start', choices=('start', 'init', 'credentials', 'healthcheck'))
+    parser.add_argument('action', nargs='?', default='start', choices=('start', 'init', 'credentials', 'healthcheck', 'codex-login', 'codex-status'))
     parser.add_argument('--data-dir', type=Path, default=Path('/data'))
     args = parser.parse_args(argv)
     try:
+        if args.action == 'codex-status':
+            print(json.dumps(codex_status(args.data_dir, os.environ), ensure_ascii=False))
+            return 0
+        if args.action == 'codex-login':
+            # Explicit owner terminal only. Never start login from the service loop.
+            return subprocess.call(codex_command('login', '--device-auth'),
+                                   env=codex_environment(args.data_dir, os.environ))
         if args.action == 'healthcheck':
             return 0 if http_ready(f'http://127.0.0.1:{gateway_port(os.environ)}/ready') else 1
         if args.action == 'credentials':

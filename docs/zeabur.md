@@ -36,10 +36,36 @@ python /app/scripts/zeabur_runtime.py credentials
 
 ## 启停和数据边界
 
-容器启动脚本只在缺少文件的全新实例中创建配置与凭据，之后由 `serein.launch` 初始化或迁移数据库。它等待 Python 服务就绪再启动网关；任何一个服务意外退出都会停止另一个，让平台重启整个实例。SIGTERM / SIGINT 会停止子进程，超过退出等待时间才强制终止。
+容器启动脚本只在缺少文件的全新实例中创建配置与凭据，之后由 `serein.launch` 初始化或迁移数据库。它等待 Python 服务就绪再启动网关；记忆服务或网关意外退出时会停止另一个，让平台重启整个实例。可选 Codex worker 的故障单独退避，不因此重启聊天服务。SIGTERM / SIGINT 会停止子进程，超过退出等待时间才强制终止。
 
 `/data/config.toml` 使用 `/data/serein.db` 和 `/data/recall-index.sqlite`；模型索引、图片及 OAuth 数据库与主库同属持久目录。路由编辑草稿也保存在 `/data/semantic-route-draft.json`。旧库路径导入只允许 `/data/legacy-input` 内的来源。
 
 更新前备份完整 `/data`，并记录对应源码版本。该目录及数据库可能包含私人对话、模型 Key 和连接密码，不能公开分享。在线数据库备份使用网页一致性备份；复制整个卷前应停止实例，避免直接复制正在写入的 SQLite 文件。首次验证至少包含网页鉴权、API 鉴权、模型列表、合成问答和重启后设置仍在；不要用私人记忆作为测试数据。
 
 根目录 Dockerfile 和 `deploy/compose.yaml` 继续用于原来的双服务部署，未改成这个单容器方案。
+
+## 可选：用 Codex 订阅整理 Event
+
+镜像内置固定版本 `@openai/codex@0.160.1`，通过已有 Node 运行。Codex worker 默认关闭；开启后与现有记忆服务和网关运行在同一容器内，串行领取 Event 整理任务，使用 `gpt-5.6-sol`。它通过容器内 `127.0.0.1:8011` 领取和提交任务，不需要公开 `/v1/extensions` 或新增公网端口。主聊天模型仍由聊天客户端选择。
+
+1. 在 Zeabur 服务环境中设置 `SEREIN_CODEX_WORKER_ENABLED=1` 并重新部署。未登录时 worker 等待登录，聊天服务照常运行。
+2. 在该服务的私有终端执行设备码登录：
+
+   ```sh
+   python /app/scripts/zeabur_runtime.py codex-login
+   ```
+
+   按终端提示，在自己的浏览器打开登录地址并输入一次性设备码。账户需要允许设备码登录；不要把设备码、登录令牌或认证文件贴进聊天、公开日志或 Issue。
+3. 在同一终端检查登录状态：
+
+   ```sh
+   python /app/scripts/zeabur_runtime.py codex-status
+   ```
+
+4. 在 Serein 的“设置 → 配置 → 自动摘要配置”选择 **Agent** 执行方式，再在“功能”页开启自动摘要。先用合成对话核对归线、切分和 Event 写作；查看原话整理进度与生成正文。登录成功不等于账户已获该型号访问权，也不等于流水线已完成。
+
+登录管理命令和 worker 使用专用 `CODEX_HOME=/data/codex-worker/auth`，登录状态随 `/data` 持久卷保留，更新容器后不必每次重新登录。该目录需保持可写，以便 Codex 刷新登录状态；不要复制桌面 Codex 的完整配置、会话或插件目录。设备码登录与凭据存储见 [OpenAI 官方认证说明](https://learn.chatgpt.com/docs/auth)。
+
+启动器分别构造子进程环境：Codex 登录配置只交给 worker，记忆服务和网关不继承 Codex／OpenAI 认证环境变量。专用目录限制文件权限，但当前单容器内进程沿用同一 root 账户，**这不是强进程隔离**；容器管理员及其他 root 进程仍可读取这些文件。完整 `/data` 备份也会包含 Codex 登录凭据，按私密凭据保管。
+
+worker 串行处理任务，无待办时等待；登录失效、额度限制或模型调用失败时暂停或退避，不自动改用其他型号或 API Key。订阅调用仍受账户额度和模型可用性约束。`/ready` 检查聊天服务，不证明 worker 已登录或摘要成功；登录看 `codex-status`，任务结果看 Serein 原话整理页面。设回 `SEREIN_CODEX_WORKER_ENABLED=0` 并重启服务可停止 worker，已有 Event 和登录状态保留。
