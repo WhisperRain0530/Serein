@@ -36,7 +36,14 @@ def test_real_http_pipeline_binds_exact_synthetic_sources(tmp_path, monkeypatch)
         assert url.startswith('http://127.0.0.1:')
         def run(task):
             calls.append(task['role'])
-            return output_for(task['role'], task['request'])
+            output = output_for(task['role'], task['request'])
+            if task['role'] == 'track_router':
+                # This is a developed planning discussion, not ongoing engineering.
+                for track in output['track_updates']:
+                    track.update(subject='青禾图书馆见面的安排',
+                                 throughline='比较商场与图书馆后选择安静读书，并更正见面时间',
+                                 event_policy='default')
+            return output
         client = smoke.SereinClient(url, token, opener=smoke.build_opener(smoke.ProxyHandler({}), smoke.NoRedirect()))
         runner = SimpleNamespace(model='synthetic-offline', run=run)
         return worker.Worker(client, runner, state).run(once=True, include_recent=True, max_jobs=24)
