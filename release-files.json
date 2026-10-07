@@ -508,6 +508,7 @@
   "release-version.json",
   "scripts/upstream_update.py",
   "tests/test_upstream_update.py",
+  "tests/test_upstream_credentials.py",
   "src/serein/api/authored_tools.py",
   "src/serein/api/diary_read.py",
   "tests/test_diary_discovery.py",

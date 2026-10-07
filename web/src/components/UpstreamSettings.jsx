@@ -24,9 +24,10 @@ export function UpstreamSettings({upstreams,modelIds=[],assignments={},onChange,
       <label className="settings-field"><span>API Base URL</span><input required type="url" placeholder="https://api.example.com/v1" value={upstream.base_url} onChange={event=>edit(upstream.id,{base_url:event.target.value})} /></label>
       <label className="settings-field"><span>API Key</span><input type="password" autoComplete="new-password" value={upstream.api_key || ""}
         data-upstream-api-key data-upstream-id={upstream.id}
-        placeholder={upstream.api_key_configured?"已配置；留空保留":"本地无认证上游可留空"}
+        placeholder={upstream.api_key_configured?"已配置；地址不变时留空保留":"本地无认证上游可留空"}
         onChange={event=>edit(upstream.id,{api_key:event.target.value,...(event.target.value?{clear_key:false}:{})})} /></label>
       {upstream.api_key_configured && <label className="settings-toggle"><span>删除已保存的密钥</span><input type="checkbox" role="switch" checked={upstream.clear_key || false} onChange={event=>edit(upstream.id,{clear_key:event.target.checked})} /></label>}
+      <p className="model-connection-help">更换 API 地址时，请填写对应的新密钥、改用新的密钥环境变量，或选择删除已保存的密钥。新密钥不会沿用旧地址的环境变量后备。</p>
       <label className="settings-field"><span>接口格式</span><select value={upstream.protocol} onChange={event=>edit(upstream.id,{protocol:event.target.value,prompt_cache:"",prompt_cache_retention:""})}>
         <option value="openai">Chat Completions / Embeddings / Rerank</option><option value="anthropic">Anthropic Messages</option></select></label>
       <details><summary>缓存与连接选项</summary>

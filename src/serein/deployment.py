@@ -128,6 +128,32 @@ def read_settings(database, *, public=False):
     return result
 
 
+def _merge_connection(previous, changes):
+    """Keep saved credentials only while editing the same upstream address."""
+    merged = {**previous, **changes}
+    old_base = str(previous.get('base_url') or '').strip().rstrip('/')
+    new_base = str(merged.get('base_url') or '').strip().rstrip('/')
+    if old_base == new_base or not (previous.get('api_key') or previous.get('api_key_env')):
+        return merged
+
+    new_key = changes.get('api_key')
+    new_env = changes.get('api_key_env')
+    env_changed = bool(new_env) and new_env != previous.get('api_key_env')
+    if new_key:
+        # A newly entered key must not retain a fallback for the former address.
+        if not env_changed and merged.get('api_key_env'):
+            merged['api_key_env'] = ''
+        return merged
+    if env_changed:
+        # Otherwise the old inline key would take precedence over the new env.
+        merged['api_key'] = ''
+        return merged
+    if not merged.get('api_key') and not merged.get('api_key_env'):
+        return merged
+    raise ValueError('上游地址已改变，请填写新地址对应的 API Key、改用新的密钥环境变量，'
+                     '或明确删除已保存的密钥后再保存。')
+
+
 def save_settings(database, changes):
     changes=deepcopy(changes)
     resume_changes=changes.get('resume') or {}
@@ -168,12 +194,14 @@ def save_settings(database, changes):
                 current['tagging'] = tagging
             elif section == 'models':
                 previous = {item['id']: item for item in current['models']}
-                current['models'] = [{**previous.get(item['id'], {}), **item} for item in values]
+                current['models'] = [_merge_connection(previous.get(item['id'], {}), item) for item in values]
             elif section == 'upstreams':
                 previous = {key: item for item in grouped_upstreams(read_from_store(store)) for key in (item.get('id'), item['name']) if key}
-                current['upstreams'] = [{**previous.get(item.get('id',item['name']), {}), **item} for item in values]
+                current['upstreams'] = [_merge_connection(previous.get(item.get('id',item['name']), {}), item) for item in values]
                 for item in current['upstreams']:
                     item.setdefault('id', uuid4().hex)
+            elif section == 'upstream':
+                current['upstream'] = _merge_connection(current['upstream'], values)
             else:
                 current[section].update(values)
         if current['features']['narrative_tools']:

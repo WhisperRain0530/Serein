@@ -11,7 +11,8 @@ import types
 from uuid import uuid4
 import zipfile
 
-REPOSITORY = 'Yinglianchun/Serein'
+# Keep this fork's fixes when the installation menu pulls an update.
+REPOSITORY = 'WhisperRain0530/Serein'
 REMOTE = f'https://github.com/{REPOSITORY}.git'
 BRANCH = 'main'
 MAX_SOURCE_BYTES = 300 * 1024 * 1024

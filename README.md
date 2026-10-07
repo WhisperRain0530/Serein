@@ -1,5 +1,9 @@
 # Serein
 
+> 此仓库是 [Yinglianchun/Serein](https://github.com/Yinglianchun/Serein) 的个人维护分支。
+> 2026-10-07 修复：更换上游地址时必须重新提供凭据或明确清除旧凭据，防止旧密钥被带到新地址；将 `source-map-js` 更新至 1.2.2。
+> 安装菜单中的“一键更新”从 **WhisperRain0530/Serein 的 main 分支**获取代码，以保留本分支修复。原项目的新改动需先审查并合入本仓库，再执行更新。
+
 <a href="https://github.com/DasterProkio/awesome-ai-companion">
   <img src="https://raw.githubusercontent.com/DasterProkio/awesome-ai-companion/main/assets/featured-in-awesome-ai-companion.png" alt="Featured in Awesome AI Companion" height="24">
 </a>
