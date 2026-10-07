@@ -33,6 +33,12 @@ MAX_OUTPUT_BYTES = 2 * 1024 * 1024
 ROLES = {'track_router', 'event_curator', 'event_writer'}
 ACKS = {'accepted', 'unchanged', 'host_deferred'}
 IDLE = {'current', 'auto_paused', 'waiting_settlement_window', 'settled_today', 'busy', 'waiting'}
+# Codex 0.160.1 emits this expected startup notice as an error item. Match the
+# complete fail-closed notice, never its alternative "direct tools" fallback.
+CODE_MODE_DISABLED_WARNING = (
+    'Code Mode is unavailable because code-mode host is disabled. '
+    'Code mode will fail closed; enable `features.code_mode_host` and install `codex-code-mode-host`.'
+)
 
 
 class WorkerError(Exception):
@@ -211,13 +217,12 @@ def codex_command(executable, model, directory, output, attachments):
         'features.hooks': False, 'features.memories': False,
         'features.remote_plugin': False, 'features.skill_mcp_dependency_install': False,
         'features.goals': False, 'features.shell_snapshot': False,
-        'features.code_mode': False, 'tools.view_image': False,
+        'features.code_mode': False,
         'features.plugins': False, 'features.browser_use': False,
         'features.browser_use_external': False, 'features.computer_use': False,
         'features.image_generation': False, 'features.view_image': False,
         'features.skill_search': False, 'features.daemon_auto_start': False,
         'features.code_mode_host': False, 'features.sleep_tool': False,
-        'skip_host_skill_discovery': True,
         'memories.use_memories': False, 'memories.generate_memories': False,
         'history.persistence': 'none', 'project_doc_max_bytes': 0,
         'hide_agent_reasoning': True, 'mcp_servers': {},
@@ -260,7 +265,17 @@ def check_events(raw):
         completed = completed or event.get('type') == 'turn.completed'
         if event.get('type', '').startswith('item.'):
             item = event.get('item', {})
-            if item.get('type') not in {'agent_message', 'reasoning'}:
+            if not isinstance(item, dict) or not isinstance(item.get('type'), str):
+                raise WorkerError('invalid_codex_events')
+            kind = item['type']
+            if kind == 'error':
+                message = item.get('message')
+                if event['type'] == 'item.completed' and message == CODE_MODE_DISABLED_WARNING:
+                    continue
+                if isinstance(message, str) and message.startswith('model rerouted:'):
+                    raise WorkerError('model_rerouted', retry_after=3600)
+                raise WorkerError('codex_cli_warning', retry_after=3600)
+            if kind not in {'agent_message', 'reasoning', 'todo_list'}:
                 raise WorkerError('codex_tool_activity', retry_after=3600)
     if not completed:
         raise WorkerError('incomplete_codex_turn')

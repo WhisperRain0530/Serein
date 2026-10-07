@@ -43,7 +43,9 @@ def fake_cli(tmp_path, monkeypatch, *, content=None, fail=None, sleep=False, eve
            'images=[pathlib.Path(args[i+1]).read_bytes().hex() for i,v in enumerate(args) if v=="-i"]\n'
            'output.write_text(json.dumps({"prompt":prompt,"images":images,"cwd":os.getcwd(),'
            '"keys":sorted(os.environ)}),encoding="utf-8")\n')
-        + 'print(json.dumps(' + repr(event or {'type': 'turn.completed', 'usage': {}}) + '))\n', encoding='utf-8')
+        + 'for event in ' + repr(event if isinstance(event, list) else
+                                [event or {'type': 'turn.completed', 'usage': {}}]) + ':\n'
+        + ' print(json.dumps(event))\n', encoding='utf-8')
     build = worker.codex_command
     monkeypatch.setattr(worker, 'codex_command', lambda *args: [sys.executable, str(script)] + build(*args)[1:])
 
@@ -76,11 +78,12 @@ def test_cli_options_require_subscription_isolation_and_exact_requested_model(tm
                      'features.shell_tool=false', 'features.apps=false', 'features.hooks=false',
                      'features.multi_agent=false', 'mcp_servers={}', 'web_search="disabled"',
                      'features.plugins=false', 'features.browser_use=false', 'features.computer_use=false',
-                     'features.view_image=false', 'features.skill_search=false', 'skip_host_skill_discovery=true',
+                     'features.view_image=false', 'features.skill_search=false',
                      'project_doc_max_bytes=0', 'history.persistence="none"'):
         assert override in command
     assert command[-1] == '-'
     assert '--dangerously-bypass-approvals-and-sandbox' not in command
+    assert not any(value.startswith(('skip_host_skill_discovery=', 'tools.view_image=')) for value in command)
 
 
 @pytest.mark.parametrize('body', ['```json\n{}\n```', '[]', '{"x":1,"x":2}',
@@ -99,11 +102,60 @@ def test_cli_timeout_kills_child_and_cleans_materials(tmp_path, monkeypatch):
     assert not list(tmp_path.glob('task-*'))
 
 
-@pytest.mark.parametrize('kind', ['command_execution', 'mcp_tool_call', 'web_search', 'file_change', 'unknown_tool'])
+@pytest.mark.parametrize('kind', ['command_execution', 'mcp_tool_call', 'collab_tool_call',
+                                 'web_search', 'file_change', 'unknown_tool'])
 def test_tool_activity_fails_closed(tmp_path, monkeypatch, kind):
     fake_cli(tmp_path, monkeypatch, content='{}', event={'type': 'item.completed', 'item': {'type': kind}})
     with pytest.raises(worker.WorkerError, match='codex_tool_activity'):
         worker.CodexRunner(tmp_path).run(task())
+
+
+def test_verified_startup_notice_and_plan_updates_allow_completed_json(tmp_path, monkeypatch):
+    # Replay the verified 0.160.1 notice, plus its ordinary plan lifecycle.
+    events = [{'type': 'item.completed', 'item': {'type': 'error', 'message':
+        'Code Mode is unavailable because code-mode host is disabled. '
+        'Code mode will fail closed; enable `features.code_mode_host` and install `codex-code-mode-host`.'}}]
+    events.extend({'type': lifecycle, 'item': {'type': 'todo_list', 'items': [
+        {'text': 'Read synthetic evidence', 'completed': lifecycle == 'item.completed'}]}}
+        for lifecycle in ('item.started', 'item.updated', 'item.completed'))
+    events.extend([{'type': 'item.completed', 'item': {'type': 'agent_message', 'text': '{"synthetic":true}'}},
+                   {'type': 'turn.completed', 'usage': {}}])
+    fake_cli(tmp_path, monkeypatch, content='{"synthetic":true}', event=events)
+    assert worker.CodexRunner(tmp_path).run(task()) == {'synthetic': True}
+    assert not list(tmp_path.glob('task-*'))
+
+
+@pytest.mark.parametrize('notice', [
+    'Codex is ignoring 2 unrecognized configuration settings.',
+    'Code Mode is unavailable because code-mode host is disabled. Falling back to direct tools; '
+    'enable `features.code_mode_host` and install `codex-code-mode-host`.',
+    worker.CODE_MODE_DISABLED_WARNING + ' Additional unexpected behavior.',
+    worker.CODE_MODE_DISABLED_WARNING.replace('host is disabled', 'host failed to start'),
+    'Synthetic unknown notice with fake-private-token',
+])
+def test_other_cli_notices_fail_without_leaking_text(notice, capsys):
+    events = [{'type': 'item.completed', 'item': {'type': 'error', 'message': notice}},
+              {'type': 'turn.completed', 'usage': {}}]
+    with pytest.raises(worker.WorkerError) as failure:
+        worker.check_events('\n'.join(json.dumps(event) for event in events))
+    assert failure.value.code == 'codex_cli_warning'
+    assert str(failure.value) == 'codex_cli_warning'
+    assert failure.value.retry_after == 3600 and capsys.readouterr().out == ''
+
+
+def test_model_reroute_is_rejected_even_when_turn_completed():
+    events = [{'type': 'item.completed', 'item': {'type': 'error', 'message':
+        'model rerouted: gpt-5.6-sol -> another-model (SyntheticReason)'}},
+        {'type': 'turn.completed', 'usage': {}}]
+    with pytest.raises(worker.WorkerError, match='^model_rerouted$'):
+        worker.check_events('\n'.join(json.dumps(event) for event in events))
+
+
+def test_expected_notice_does_not_replace_turn_completion():
+    event = {'type': 'item.completed', 'item': {'type': 'error',
+                                             'message': worker.CODE_MODE_DISABLED_WARNING}}
+    with pytest.raises(worker.WorkerError, match='incomplete_codex_turn'):
+        worker.check_events(json.dumps(event))
 
 
 def test_incomplete_cli_turn_is_not_success():
