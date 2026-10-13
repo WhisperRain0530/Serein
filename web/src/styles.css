@@ -7232,6 +7232,9 @@ label:has(input:focus-visible) {
 .time-context-zone > span { font-size: 13px; }
 .time-context-zone > small { grid-column: 2; color: var(--muted); font-size: 11px; line-height: 1.55; }
 .model-connection-help { color: var(--faint); font-size: 12px; line-height: 1.7; }
+.codex-subscription-status { margin: 18px 0; padding: 16px 18px; border: 1px solid var(--line); border-radius: 8px; line-height: 1.7; }
+.codex-subscription-status p { margin: 6px 0; }
+.codex-subscription-status small { display: block; color: var(--faint); overflow-wrap: anywhere; }
 @media (max-width: 600px) { .model-assignments, .time-context-zone { grid-template-columns: 1fr; } .model-assignment-group { padding: 16px; } .model-assignment-group__heading { display: block; } .model-assignment-group__heading p { margin-top: 5px; text-align: left; } .time-context-zone > small { grid-column: 1; } }
 .app-shell--settings > .sidebar { position: fixed; opacity: 1; visibility: visible; }
 .help-page > .sidebar { position: fixed; opacity: 1; visibility: visible; }

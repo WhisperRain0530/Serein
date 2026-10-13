@@ -8,6 +8,7 @@ from urllib.parse import urlsplit
 import httpx
 from .chat_context import ClientContext
 from .deployment import task_model
+from .codex_config import CODEX_TASK_TIMEOUT_SECONDS, is_codex_model
 
 
 logger = logging.getLogger(__name__)
@@ -113,6 +114,9 @@ def normalize_response(model, result):
 
 
 async def complete(model, payload, *, window_id=''):
+    if is_codex_model(model):
+        from .codex_client import complete as codex_complete
+        return await codex_complete(model, payload)
     url, headers, body = request_for(model, {**payload, 'stream':False}, window_id=window_id)
     async with httpx.AsyncClient(timeout=httpx.Timeout(model.get('request_timeout_seconds',120),connect=15,pool=15), follow_redirects=False) as client:
         response = await client.post(url, headers=headers, json=body)
@@ -177,6 +181,8 @@ class TaskClient:
             payload.update(non_thinking_options(model))
         import asyncio
         timeout = payload.pop('timeout', 120)
+        if is_codex_model(model):
+            timeout = CODEX_TASK_TIMEOUT_SECONDS
         result=await asyncio.wait_for(complete(model,payload), timeout=timeout)
         return json.loads(json.dumps(result),object_hook=lambda row:SimpleNamespace(**row))
 

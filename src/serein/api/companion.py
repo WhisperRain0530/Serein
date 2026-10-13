@@ -7,7 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from ..compat.memo_store import ReminderStore
 from ..compat.persona_engine import PersonaStateEngine
-from ..deployment import read_settings, task_model
+from ..deployment import read_settings, available_task_model
 
 class MemoEdit(BaseModel):
     model_config = ConfigDict(extra='forbid', str_strip_whitespace=True)
@@ -77,7 +77,7 @@ def routes(settings, auth):
         return {**snapshot,'session_id':selected,'sessions':sessions,
                 'events':engine._list_events(20,selected or None),
                 'ai_name':state['identity']['ai_name'],
-                'enabled':state['features']['persona'],'model_configured':bool(task_model(settings.database,'persona'))}
+                'enabled':state['features']['persona'],'model_configured':bool(available_task_model(settings.database,'persona'))}
 
     def memos():
         return ReminderStore({'serein_database':settings.database})

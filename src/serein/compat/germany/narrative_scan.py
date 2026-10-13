@@ -212,9 +212,12 @@ class NarrativeScout:
         """Route new material into Arcs and create review hints; never invoke Narrative Writer."""
         settings = self._narrative_revision_scan_settings(self.config)
         scan_timezone = settings['timezone']
-        from ...deployment import read_settings, task_model
-        nightly_enabled = bool(read_settings(self.settings.database)['features'].get('narrative_nightly_organize'))
-        configured_model = task_model(self.settings.database, 'narrative_scout')
+        from ...deployment import read_settings, available_task_model
+        state = read_settings(self.settings.database)
+        nightly_enabled = bool(state['features'].get('narrative_nightly_organize'))
+        configured_model = None
+        if include_external and nightly_enabled:
+            configured_model = available_task_model(self.settings.database, 'narrative_scout')
         scout_model = str((configured_model or {}).get('model') or '')
         scout_base_url = str((configured_model or {}).get('base_url') or '')
         scout_status = 'disabled'

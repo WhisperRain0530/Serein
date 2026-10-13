@@ -2550,7 +2550,12 @@ class SceneLinker:
         }
 
     async def _call_provider(self, provider: dict, payload: dict) -> dict | None:
-        from ...model_runtime import non_thinking_options
+        from ...model_runtime import non_thinking_options, TaskClient
+        from ...deployment import task_model
+        from ...codex_config import CODEX_TASK_TIMEOUT_SECONDS, is_codex_model
+        client = provider['client']
+        subscription = isinstance(client, TaskClient) and is_codex_model(task_model(client.database, client.task))
+        timeout = CODEX_TASK_TIMEOUT_SECONDS + 30 if subscription else self.timeout_seconds
         options: dict[str, Any] = {
             "model": provider["model"],
             "messages": [
@@ -2565,7 +2570,7 @@ class SceneLinker:
             options["temperature"] = float(provider["temperature"])
         response = await asyncio.wait_for(
             provider["client"].chat.completions.create(**options),
-            timeout=self.timeout_seconds,
+            timeout=timeout,
         )
         try:
             choice = response.choices[0] if response.choices else None

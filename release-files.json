@@ -559,5 +559,14 @@
   "src/serein/adapters/token_window.py",
   "tests/test_token_windows.py",
   "src/serein/recall/manual.py",
-  "tests/test_manual_recall_fallback.py"
+  "tests/test_manual_recall_fallback.py",
+  "scripts/codex_task_service.py",
+  "tests/test_codex_task_service.py",
+  "src/serein/codex_config.py",
+  "src/serein/codex_client.py",
+  "tests/test_codex_config.py",
+  "tests/test_codex_client.py",
+  "scripts/codex_tasks_smoke.py",
+  "scripts/codex_tasks_writer_fixture.mjs",
+  "tests/test_codex_tasks_smoke.py"
 ]

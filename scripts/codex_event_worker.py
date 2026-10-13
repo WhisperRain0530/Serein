@@ -294,46 +294,127 @@ def stop_process(process):
     process.wait()
 
 
+@contextmanager
+def cli_execution(lock_file=None, *, timeout=45, cancel=None):
+    """Bound each subscription invocation, including other local task processes."""
+    if not lock_file:
+        yield
+        return
+    path = Path(lock_file)
+    deadline = time.monotonic() + timeout
+    cooldown = path.with_name(path.name + '.cooldown.json')
+    fd = os.open(path, os.O_RDWR | os.O_CREAT | getattr(os, 'O_NOFOLLOW', 0), 0o600)
+    with os.fdopen(fd, 'r+b') as stream:
+        acquired = False
+        try:
+            while not acquired:
+                if cancel is not None and cancel.is_set():
+                    raise WorkerError('codex_cancelled')
+                if time.monotonic() >= deadline:
+                    raise WorkerError('codex_queue_timeout')
+                try:
+                    if os.name == 'posix':
+                        import fcntl
+                        fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    else:
+                        import msvcrt
+                        if not path.stat().st_size:
+                            stream.write(b'0'); stream.flush()
+                        stream.seek(0)
+                        msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+                    acquired = True
+                except OSError:
+                    if cancel is not None:
+                        cancel.wait(.05)
+                    else:
+                        time.sleep(.05)
+            if cooldown.exists():
+                saved = strict_json(cooldown.read_bytes())
+                codes = {'codex_usage_limit', 'codex_login_required', 'model_rerouted',
+                         'codex_cli_warning', 'codex_tool_activity', 'codex_unavailable'}
+                if (not isinstance(saved, dict) or saved.get('code') not in codes
+                        or not isinstance(saved.get('retry_at'), (int, float))):
+                    raise WorkerError('codex_state_invalid')
+                remaining = saved['retry_at'] - time.time()
+                if remaining > 0:
+                    raise WorkerError(saved['code'], retry_after=math.ceil(remaining))
+            try:
+                yield
+            except WorkerError as error:
+                if error.code in {'codex_usage_limit', 'codex_login_required', 'model_rerouted',
+                                  'codex_cli_warning', 'codex_tool_activity', 'codex_unavailable'}:
+                    private_write(cooldown, {'code': error.code,
+                        'retry_at': time.time() + max(60, error.retry_after)})
+                raise
+        finally:
+            if acquired:
+                if os.name == 'posix':
+                    fcntl.flock(stream, fcntl.LOCK_UN)
+                else:
+                    stream.seek(0); msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+
+
+def run_codex_text(directory, prompt, attachments, *, model=DEFAULT_MODEL, executable='codex',
+                   timeout=300, environ=None, cancel=None):
+    """One isolated invocation; return unchanged final text, never process logs."""
+    directory = Path(directory)
+    output = directory / 'final.json'
+    command = codex_command(executable, model, directory, output, attachments)
+    with tempfile.TemporaryFile(dir=directory) as stdout, tempfile.TemporaryFile(dir=directory) as stderr:
+        try:
+            process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=stdout,
+                                       stderr=stderr, cwd=directory, env=child_environment(environ),
+                                       start_new_session=os.name == 'posix',
+                                       creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+        except OSError:
+            raise WorkerError('codex_unavailable', retry_after=3600) from None
+        deadline = time.monotonic() + timeout
+        value = prompt.encode('utf-8')
+        try:
+            while True:
+                if cancel is not None and cancel.is_set():
+                    raise WorkerError('codex_cancelled')
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise WorkerError('codex_timeout')
+                try:
+                    process.communicate(value, timeout=min(.1, remaining))
+                    break
+                except subprocess.TimeoutExpired:
+                    value = None
+        except BaseException:
+            stop_process(process)
+            raise
+        stdout.seek(0); stderr.seek(0)
+        events = stdout.read(8 * 1024 * 1024 + 1)
+        errors = stderr.read(256 * 1024).decode('utf-8', errors='replace')
+        if process.returncode:
+            raise process_error(errors + events.decode('utf-8', errors='replace'))
+        if len(events) > 8 * 1024 * 1024:
+            raise WorkerError('codex_output_too_large')
+        check_events(events)
+    if not output.is_file() or output.stat().st_size > MAX_OUTPUT_BYTES:
+        raise WorkerError('missing_codex_output')
+    try:
+        return output.read_bytes().decode('utf-8')
+    except UnicodeError:
+        raise WorkerError('invalid_codex_output') from None
+
+
 class CodexRunner:
     def __init__(self, state_dir, *, model=DEFAULT_MODEL, executable='codex', timeout=900, environ=None):
         self.state_dir, self.model, self.executable = Path(state_dir), model, executable
         self.timeout, self.environ = timeout, child_environment(environ)
+        self.lock_file = (os.environ if environ is None else environ).get('SEREIN_CODEX_LOCK_FILE')
 
     def run(self, task):
         with tempfile.TemporaryDirectory(prefix='task-', dir=self.state_dir) as temporary:
             directory = Path(temporary)
             prompt, attachments = frozen_input(task, directory)
-            output = directory / 'final.json'
-            command = codex_command(self.executable, self.model, directory, output, attachments)
-            # No generated text reaches the service log. Temporary CLI output is
-            # removed with this isolated task directory, including on failure.
-            with tempfile.TemporaryFile(dir=directory) as stdout, tempfile.TemporaryFile(dir=directory) as stderr:
-                try:
-                    process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=stdout,
-                                               stderr=stderr, cwd=directory, env=self.environ,
-                                               start_new_session=os.name == 'posix',
-                                               creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
-                except OSError:
-                    raise WorkerError('codex_unavailable', retry_after=3600) from None
-                try:
-                    process.communicate(prompt.encode('utf-8'), timeout=self.timeout)
-                except subprocess.TimeoutExpired:
-                    stop_process(process)
-                    raise WorkerError('codex_timeout') from None
-                except BaseException:
-                    stop_process(process)
-                    raise
-                stdout.seek(0); stderr.seek(0)
-                events = stdout.read(8 * 1024 * 1024 + 1)
-                errors = stderr.read(256 * 1024).decode('utf-8', errors='replace')
-                if process.returncode:
-                    raise process_error(errors + events.decode('utf-8', errors='replace'))
-                if len(events) > 8 * 1024 * 1024:
-                    raise WorkerError('codex_output_too_large')
-                check_events(events)
-            if not output.is_file() or output.stat().st_size > MAX_OUTPUT_BYTES:
-                raise WorkerError('missing_codex_output')
-            result = strict_json(output.read_bytes())
+            with cli_execution(self.lock_file):
+                text = run_codex_text(directory, prompt, attachments, model=self.model,
+                    executable=self.executable, timeout=self.timeout, environ=self.environ)
+            result = strict_json(text)
             if not isinstance(result, dict):
                 raise WorkerError('invalid_codex_output')
             return result

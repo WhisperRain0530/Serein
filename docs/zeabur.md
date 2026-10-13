@@ -1,6 +1,6 @@
 # 在 Zeabur 部署单实例
 
-此部署把 Python 记忆服务和 Node 网关放在一个容器内，适合个人使用。只有网关 8080 端口对外；Python 8011 和网页预览 4173 仅监听容器内的 loopback。保留一个副本，使用一个持久卷。
+此部署把 Python 记忆服务和 Node 网关放在一个容器内，适合个人使用。只有网关 8080 端口对外；Python 8011、可选订阅任务服务 8012 和网页预览 4173 仅监听容器内的 loopback。保留一个副本，使用一个持久卷。
 
 ## 首次部署
 
@@ -69,3 +69,23 @@ python /app/scripts/zeabur_runtime.py credentials
 启动器分别构造子进程环境：Codex 登录配置只交给 worker，记忆服务和网关不继承 Codex／OpenAI 认证环境变量。专用目录限制文件权限，但当前单容器内进程沿用同一 root 账户，**这不是强进程隔离**；容器管理员及其他 root 进程仍可读取这些文件。完整 `/data` 备份也会包含 Codex 登录凭据，按私密凭据保管。
 
 worker 串行处理任务，无待办时等待；登录失效、额度限制或模型调用失败时暂停或退避，不自动改用其他型号或 API Key。订阅调用仍受账户额度和模型可用性约束。`/ready` 检查聊天服务，不证明 worker 已登录或摘要成功；登录看 `codex-status`，任务结果看 Serein 原话整理页面。设回 `SEREIN_CODEX_WORKER_ENABLED=0` 并重启服务可停止 worker，已有 Event 和登录状态保留。
+
+## 可选：让其他文字任务使用同一 Sol 订阅
+
+设置 `SEREIN_CODEX_TASKS_ENABLED=1` 并重新部署后，网页的模型页会显示 **Codex 订阅 · GPT‑5.6 Sol** 及订阅任务服务状态。在“配置 → 功能使用的模型”里，可以分别将打标、Scene 关系、Event · Arc 归档、叙事卷找材料、Narrative Writer、心绪／防撤退、梦境指定给它。它使用上节的同一专用订阅登录，无需填写另一把 API Key。
+
+该选项仅供这七类文字任务使用，不出现在 Kelivo 的聊天模型列表中，也不承接 Embedding、Reranker 或图片转录。原有 Event 自动摘要继续使用单独的 Agent worker。选择模型不改变已有功能开关：Writer 仍须启用，生成后仍先预览、由用户确认保存；心绪／防撤退和夜间整理也沿用各自现有开关。
+
+原有任务消息、提示词和输出契约原样装入订阅请求；梦境返回原正文，其余结果仍经过原业务校验。CLI 固定使用 `gpt-5.6-sol`、`high`，不逐项映射 API 的 `temperature`、`max_tokens` 或单项推理参数，因此不承诺与 API 采样行为相同。任务排队最多 45 秒，单次生成最多 300 秒；任务协程取消或执行超时会停止对应 CLI 进程组，失败不会自动重发同一次模型调用。
+
+私有任务服务只监听 `127.0.0.1:8012`，并校验本实例的内部令牌；不要在 Zeabur 中公开此端口。它与 Event worker 共用 `/data/codex-worker/execution.lock`，串行占用订阅 CLI，并共享登录／额度退避。状态只记录任务类型、时间和固定错误码，不包含任务材料、模型正文、账户标识或认证内容。网页状态超过有效时间会显示为离线，不把旧状态当作当前成功。
+
+设置 `SEREIN_CODEX_TASKS_ENABLED=0` 并重启可停止这条通道。已有模型分配会保留，但不会偷偷切到 API 或其他模型；重新启用或明确另选模型后才恢复调用。停止通道不删除记忆或订阅登录。
+
+部署后可在私有终端用合成材料检查七个入口（心绪／防撤退及找材料各两个分支，共九次请求）：
+
+```sh
+SEREIN_CODEX_TASK_TOKEN_FILE=/data/secrets/api-token python /app/scripts/codex_tasks_smoke.py --run --output-dir /tmp/serein-smoke
+```
+
+脚本仅使用自己的临时数据库，不读取生产记忆或发布叙事卷；报告保留合成输入和原始输出供人工核对。省略 `--run` 只检查离线夹具，不证明订阅已经接通或模型内容正确。

@@ -8,6 +8,7 @@ from urllib.parse import urlsplit
 from uuid import uuid4, uuid5, NAMESPACE_URL
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from .core.store import Store, encode, Conflict, now
+from .codex_config import CODEX_MODEL_ID, CODEX_TASKS, codex_model, codex_tasks_enabled, codex_task_status
 
 DEFAULT_IDENTITY = {'user_name': 'User', 'ai_name': 'AI'}
 DEFAULT_UPSTREAM = {'base_url': '', 'model': '', 'writer_model': '', 'api_key': '',
@@ -119,6 +120,8 @@ def read_settings(database, *, public=False):
         result['models'] = []
         result['available_models'] = [{key:item.get(key) for key in ('id','label','model','protocol','upstream_name')}
                                       for item in configured_models(result)]
+        result['internal_models'] = [codex_model()] if codex_tasks_enabled() else []
+        result['codex_subscription'] = codex_task_status()
         upstream = result['upstream']
         upstream['api_key_configured'] = bool(upstream.pop('api_key'))
         for model in result['models']:
@@ -165,6 +168,7 @@ def save_settings(database, changes):
         resume_changes['recent_originals']=False
     with Store(database) as store, store.transaction(immediate=True):
         current = read_from_store(store)
+        previous_assignments = dict(current['assignments'])
         previous_auto_enabled = current['pipeline']['auto_enabled']
         stored=store.conn.execute("SELECT value_json FROM background_state WHERE name='deployment_settings'").fetchone()
         explicit_mode='execution_mode' in (json.loads(stored[0]).get('pipeline',{}) if stored else {}) or 'execution_mode' in changes.get('pipeline',{})
@@ -222,13 +226,21 @@ def save_settings(database, changes):
             store.conn.execute("UPDATE background_state SET value_json=json_set(value_json,'$.pending',json('{}'),'$.token','','$.running_until',0) WHERE name LIKE 'anti_retreat:%'")
         catalog = configured_models(current)
         known = {item['id'] for item in catalog}
+        if CODEX_MODEL_ID in known or any(item.get('transport') == 'codex_subscription' for item in catalog):
+            raise ValueError('The Codex subscription model ID is reserved for internal tasks')
         if len(known) != len(catalog):
             raise ValueError('Client model IDs must be unique; use aliases for models offered by multiple upstreams')
         public_names = [client_model_id(model) for model in chat_models(current)]
         if len(set(public_names)) != len(public_names):
             raise ValueError('Models in an upstream need distinct aliases; upstream names must distinguish their models')
-        if any(value and value not in known for value in current['assignments'].values()):
-            raise ValueError('A selected model is missing; clear its task assignment before removing it')
+        for task, value in current['assignments'].items():
+            if value == CODEX_MODEL_ID:
+                if task not in CODEX_TASKS:
+                    raise ValueError('Codex subscription is not available for this task')
+                if not codex_tasks_enabled() and previous_assignments.get(task) != value:
+                    raise ValueError('Codex subscription tasks are not enabled on this server')
+            elif value and value not in known:
+                raise ValueError('A selected model is missing; clear its task assignment before removing it')
         image_features = current['features']['image_transcription_async'], current['features']['image_eyes']
         if all(image_features):
             raise ValueError('“异步图片转录”和“眼睛”只能开启一个')
@@ -291,6 +303,15 @@ def expanded_identity(names):
     return {**names, 'user_display_name': names['user_name'], 'user_aliases': []}
 
 
+def available_task_model(database, task):
+    """Optional readers/jobs skip disabled subscriptions; execution stays strict."""
+    normalized = 'persona' if task == 'anti_retreat' else task
+    if (normalized in CODEX_TASKS and not codex_tasks_enabled()
+            and read_settings(database)['assignments'].get(normalized) == CODEX_MODEL_ID):
+        return None
+    return task_model(database, task)
+
+
 def task_model(database, task, *, requested=''):
     if task == 'anti_retreat':task = 'persona'
     state = read_settings(database)
@@ -301,6 +322,12 @@ def task_model(database, task, *, requested=''):
         default = state['upstreams'][0].get('default_model')
         requested = default if any(item['id']==default for item in catalog) else (catalog[0]['id'] if catalog else '')
     key = requested or state['assignments'].get(task)
+    if key == CODEX_MODEL_ID:
+        if task not in CODEX_TASKS:
+            raise ValueError('Codex subscription is not available for this task')
+        if not codex_tasks_enabled():
+            raise ValueError('Codex subscription tasks are not enabled on this server')
+        return codex_model(task)
     if key:
         model = next((item for item in catalog if client_model_id(item) == key), None) if task == 'chat' else None
         model = model or next((item for item in catalog if item['id'] == key), None)

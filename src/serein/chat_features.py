@@ -4,9 +4,10 @@ import asyncio
 import logging
 import time
 from uuid import uuid4
-from .deployment import read_settings, task_model, feature_enabled
+from .deployment import read_settings, task_model, available_task_model, feature_enabled
 from .core.store import Store, encode
 from .chat_context import ClientContext
+from .codex_config import CODEX_TASK_TIMEOUT_SECONDS, is_codex_model
 
 
 def persona_engine(database, task, state):
@@ -91,7 +92,7 @@ async def after_reply(database, window_id, query, message, messages, round_id=No
             await engine.update_from_exchange(window_id,query,message,
                 recalled_memory_ids=recalled_ids or [],recent_conversation_turns=conversation_turns(messages))
     tasks=[]
-    if task_model(database,'persona'):
+    if available_task_model(database,'persona'):
         if state['features']['persona']:tasks.append(evaluate_persona())
         if state['features']['anti_retreat']:
             tasks.append(evaluate_retreat(database,window_id,query,message,messages,round_id or current_round(database,window_id),state))
@@ -103,18 +104,21 @@ async def after_reply(database, window_id, query, message, messages, round_id=No
 async def evaluate_retreat(database,window_id,query,message,messages,round_id,state):
     """One async detector per window; a signal is usable only on the following turn."""
     key='anti_retreat:'+window_id;token=uuid4().hex;stamp=time.time()
+    subscription=is_codex_model(task_model(database,'persona'))
+    timeout=CODEX_TASK_TIMEOUT_SECONDS+30 if subscription else 90
+    lease=CODEX_TASK_TIMEOUT_SECONDS+60 if subscription else 120
     with Store(database) as store,store.transaction(immediate=True):
         row=store.conn.execute('SELECT value_json FROM background_state WHERE name=?',(key,)).fetchone()
         saved=json.loads(row[0]) if row else {}
         if (saved.get('running_until',0)>stamp or saved.get('checked_round',-1)>=round_id
             or saved.get('pending',{}).get('round',0)>round_id
             or (saved.get('last_round') is not None and (round_id+1-saved['last_round']<6 or stamp-saved['last_at']<600))):return
-        saved.update(token=token,running_until=stamp+120,checked_round=round_id,pending={})
+        saved.update(token=token,running_until=stamp+lease,checked_round=round_id,pending={})
         store.conn.execute('INSERT INTO background_state VALUES (?,?) ON CONFLICT(name) DO UPDATE SET value_json=excluded.value_json',(key,encode(saved)))
     try:
         engine=persona_engine(database,'anti_retreat',state)
         history=[*conversation_turns(messages),{'user_text':query,'assistant_text':message}][-8:]
-        result=await asyncio.wait_for(engine.detect_conflict_nudge(query,history),90)
+        result=await asyncio.wait_for(engine.detect_conflict_nudge(query,history),timeout)
         enabled=feature_enabled(database,'anti_retreat')
         next_round=current_round(database,window_id)+1
         with Store(database) as store,store.transaction(immediate=True):

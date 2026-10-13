@@ -33,9 +33,16 @@ def lexical_index(settings):
 
 def cue_index(settings, *, writable=False, profile=None):
     from .germany.memory_recall.cue_passage_shadow import CuePassageShadowIndex, BINDING_PROMPT
-    from ..deployment import task_model
+    from ..deployment import task_model, available_task_model, read_settings
+    from ..codex_config import CODEX_MODEL_ID, codex_model
     from ..core.store import digest, encode
     cfg=config(settings)
+    selected=task_model(settings.database,'operit_tagging') if writable else available_task_model(settings.database,'operit_tagging')
+    disabled_subscription=not selected and read_settings(settings.database)['assignments'].get('operit_tagging') == CODEX_MODEL_ID
+    if disabled_subscription:
+        # Read cached cues with the original binder fingerprint, without any
+        # callable provider or a fallback to legacy credentials.
+        selected=codex_model('operit_tagging')
     client=EmbeddingClient(settings.database,settings.index,**settings.embedding) if writable else None
     if profile is None:
         import json
@@ -49,7 +56,6 @@ def cue_index(settings, *, writable=False, profile=None):
             return (await asyncio.to_thread(client.documents,[text]))[0]
     raw=cfg.get('cue_passage_shadow') or {}; llm=cfg.get('dehydration') or {}
     binder=None if writable else SimpleNamespace(model=raw.get('binding_model') or llm.get('model') or '')
-    selected=task_model(settings.database,'operit_tagging')
     if selected:
         class ConfiguredBinder:
             model=selected['model']+':'+digest(encode({key:selected.get(key) for key in ('id','base_url','protocol')}))[:12]
@@ -62,7 +68,7 @@ def cue_index(settings, *, writable=False, profile=None):
                     'response_format':{'type':'json_object'},'temperature':0,
                     **non_thinking_options(selected)})
                 return json.loads(response['choices'][0]['message']['content'])
-        binder=ConfiguredBinder()
+        binder=SimpleNamespace(model=ConfiguredBinder.model) if disabled_subscription else ConfiguredBinder()
     return CuePassageShadowIndex(cfg,Embedding(),binder=binder)
 
 

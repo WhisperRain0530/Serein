@@ -102,6 +102,17 @@ def test_cli_timeout_kills_child_and_cleans_materials(tmp_path, monkeypatch):
     assert not list(tmp_path.glob('task-*'))
 
 
+def test_event_runner_respects_subscription_service_shared_cooldown(tmp_path, monkeypatch):
+    lock = tmp_path / 'shared.lock'
+    worker.private_write(lock.with_name(lock.name + '.cooldown.json'), {
+        'code': 'codex_usage_limit', 'retry_at': worker.time.time() + 3600})
+    monkeypatch.setattr(worker, 'run_codex_text', lambda *_args, **_kwargs:
+                        pytest.fail('Event must not invoke CLI during shared quota backoff'))
+    with pytest.raises(worker.WorkerError, match='codex_usage_limit'):
+        worker.CodexRunner(tmp_path, environ={'SEREIN_CODEX_LOCK_FILE': str(lock)}).run(task())
+    assert not list(tmp_path.glob('task-*'))
+
+
 @pytest.mark.parametrize('kind', ['command_execution', 'mcp_tool_call', 'collab_tool_call',
                                  'web_search', 'file_change', 'unknown_tool'])
 def test_tool_activity_fails_closed(tmp_path, monkeypatch, kind):

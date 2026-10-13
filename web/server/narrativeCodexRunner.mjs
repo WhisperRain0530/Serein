@@ -117,13 +117,16 @@ export function narrativeBodyDiff(currentBody, proposedBody) {
 
 // The configured runner accepts one JSON object on stdin and returns the result
 // schema on stdout. It owns provider credentials; Serein never selects a chat window.
-export async function runNarrativeCodexTask({mode,title,writingFocus = "",currentBody,materials,roleDir}, {backend = callSereinBackend, signal} = {}) {
+export async function runNarrativeCodexTask({mode,title,writingFocus = "",currentBody,materials,roleDir}, {backend = callSereinBackend, signal, setJobTimeout} = {}) {
   const instance = await backend("/v1/settings", {signal});
   if (!instance.ok) throw new Error("narrative_identity_unavailable");
   const {identity, upstream} = instance.payload;
   if (instance.payload.features?.narrative_tools) throw new Error("narrative_writer_disabled_main_model_authoring");
-  const writerModel = (instance.payload.available_models || instance.payload.models)?.find(item => item.id === instance.payload.assignments?.writer);
+  const writerModel = [...(instance.payload.available_models || instance.payload.models || []), ...(instance.payload.internal_models || [])]
+    .find(item => item.id === instance.payload.assignments?.writer);
   const useUpstream = upstream.writer_enabled;
+  const useSubscription = useUpstream && writerModel?.id === 'serein-codex-sol' && writerModel?.transport === 'codex_subscription';
+  if (useSubscription) setJobTimeout?.(420_000);
   if (!useUpstream && process.env.SEREIN_WRITER_ENABLED !== "1") throw new Error("narrative_writer_disabled");
   const command = JSON.parse(process.env.SEREIN_WRITER_COMMAND || "[]");
   if (!useUpstream && (!Array.isArray(command) || !command.length || command.some(x => typeof x !== "string"))) {
@@ -135,7 +138,7 @@ export async function runNarrativeCodexTask({mode,title,writingFocus = "",curren
   const task = {task:"narrative_preview", model:selection.model, reasoning:selection.reasoningEffort,
     prompt, materials, output_schema:JSON.parse(readFileSync(join(roleDir,"output.schema.json"),"utf8"))};
   const raw = useUpstream ? await (async () => {
-    const result = await backend("/v1/models/writer", {method:"POST",body:task,signal}, {timeout:310_000});
+    const result = await backend("/v1/models/writer", {method:"POST",body:task,signal}, {timeout:useSubscription?390_000:310_000});
     if (!result.ok) throw new Error(result.status === 504 ? "narrative_writer_timeout" : "narrative_upstream_failed");
     return result.payload.result;
   })() : await new Promise((resolveResult,reject) => {

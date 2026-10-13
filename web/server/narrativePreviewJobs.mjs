@@ -14,7 +14,7 @@ export function createNarrativePreviewJobs({ now = Date.now, ttlMs = 600_000, ti
       prune();
       if ([...jobs.values()].filter((job) => job.state === "pending").length >= 3) return null;
       const id = randomUUID();
-      const job = { state: "pending", createdAt: now(), result: null };
+      const job = { state: "pending", createdAt: now(), timeoutMs, result: null };
       jobs.set(id, job);
       const controller = new AbortController();
       const finish = (result) => {
@@ -34,19 +34,27 @@ export function createNarrativePreviewJobs({ now = Date.now, ttlMs = 600_000, ti
           payload: {
             status: "error",
             reason: "narrative_preview_failed",
-            message: writerTimeout ? "叙事卷生成超过 5 分钟，请重新预览。"
+            message: writerTimeout ? (job.timeoutMs===420_000?"叙事卷订阅任务等待超时，请重新预览。":"叙事卷生成超过 5 分钟，请重新预览。")
               : timedOut ? "预览请求超时，请重新预览。" : "暂时没有生成叙事卷预览。",
             writes_performed: [],
           },
         });
       };
-      const timer = setTimeout(() => {
+      const expire = () => {
         const error = new Error("narrative_writer_timeout");
         fail(error);
         controller.abort(error);
-      }, timeoutMs);
+      };
+      let timer = setTimeout(expire, timeoutMs);
       timer.unref?.();
-      void Promise.resolve().then(() => work(controller.signal)).then(
+      const setJobTimeout = (milliseconds) => {
+        if (job.state !== 'pending' || milliseconds !== 420_000) return;
+        job.timeoutMs=milliseconds;
+        clearTimeout(timer);
+        timer=setTimeout(expire,Math.max(0,job.createdAt+milliseconds-now()));
+        timer.unref?.();
+      };
+      void Promise.resolve().then(() => work(controller.signal,setJobTimeout)).then(
         finish, fail,
       );
       return id;

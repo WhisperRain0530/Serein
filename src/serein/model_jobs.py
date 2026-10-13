@@ -1,7 +1,7 @@
 """Run the model-selected jobs and the model-free Arc revision check."""
 import asyncio
 import logging
-from .deployment import read_settings, configured_models
+from .deployment import read_settings, configured_models, available_task_model
 from .core.store import encode
 
 
@@ -24,7 +24,7 @@ async def run(application):
                 if feature in application.enabled_extensions or (feature == 'narrative_revision' and
                         'narrative_scout' in application.enabled_extensions):continue
                 selected=config['assignments'].get(feature)
-                model=next((item for item in configured_models(config) if item['id']==selected),None)
+                model=available_task_model(settings.database,feature) if selected else None
                 signature=encode(model) if model else ''
                 if feature=='narrative_revision':
                     signature='program-check'

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { instanceSettings } from "../storage/instanceStore.js";
 import {UpstreamSettings} from "./UpstreamSettings.jsx";
-import {upstreamModels,taskModelOptions} from "../modelOptions.js";
+import {upstreamModels,taskModelOptions,retainTaskAssignments,codexStatusLabel} from "../modelOptions.js";
 import {AgentGuide} from './AgentGuide.jsx';
 import {RecallThresholdSettings} from './RecallThresholdSettings.jsx';
 import {upstreamsForSave} from '../upstreamSecrets.js';
@@ -54,11 +54,25 @@ export function ModelSettings({page,summaryRequest=0,onOpenPipeline,onOpenCatalo
     window.addEventListener('serein:settings-saved',saved);
     return()=>{active=false;window.removeEventListener('serein:settings-saved',saved);};
   },[]);
+  useEffect(()=>{
+    if(!['models','configuration'].includes(page))return;
+    let active=true;
+    const refresh=()=>{
+      if(document.hidden)return;
+      instanceSettings().then(value=>{if(active)setConfig(current=>current?{...current,
+        internal_models:value.internal_models,codex_subscription:value.codex_subscription}:current);})
+        .catch(()=>{if(active)setConfig(current=>current?{...current,codex_subscription:{...current.codex_subscription,
+          state:'stale',stale:true,online:false,subscription_authenticated:false}}:current);});
+    };
+    const timer=setInterval(refresh,15000);
+    document.addEventListener('visibilitychange',refresh);
+    return()=>{active=false;clearInterval(timer);document.removeEventListener('visibilitychange',refresh);};
+  },[page]);
   function option(key,value) {setConfig(current=>({...current,upstream:{...current.upstream,[key]:value}}));}
-  const availableModels=config?[...config.models,...upstreamModels(config.upstreams || [])]:[];
+  const availableModels=config?[...config.models,...upstreamModels(config.upstreams || []),...(config.internal_models || [])]:[];
   function changeUpstreams(upstreams) {
-    const ids=new Set([...config.models,...upstreamModels(upstreams)].map(model=>model.id));
-    setConfig(current=>({...current,upstreams,assignments:Object.fromEntries(Object.entries(current.assignments).map(([key,value])=>[key,ids.has(value)?value:""]))}));
+    setConfig(current=>({...current,upstreams,assignments:retainTaskAssignments(current.assignments,
+      [...current.models,...upstreamModels(upstreams),...(current.internal_models || [])])}));
     setStatus("上游设置尚未保存。");
   }
   async function save(event) {
@@ -102,6 +116,15 @@ export function ModelSettings({page,summaryRequest=0,onOpenPipeline,onOpenCatalo
         {config&&<form ref={upstreamForm} onSubmit={save}>
       <div className="settings-group__heading"><h3>上游与模型</h3></div>
       <p className="model-connection-help">按上游管理模型，密钥只保存在服务端。</p>
+      {config.codex_subscription?.enabled&&<section className="codex-subscription-status" aria-label="Codex 订阅状态">
+        <strong>Codex 订阅 · GPT-5.6 Sol</strong>
+        <p role="status">{codexStatusLabel(config.codex_subscription)}{config.codex_subscription.current_task&&` · ${tasks[config.codex_subscription.current_task] || ''}`}</p>
+        <small>统一使用 high；API 温度和输出长度参数不会逐项沿用。</small>
+        <small>供文字整理与创作功能选择；各功能仍按自己的开关运行。</small>
+        {config.codex_subscription.updated_at>0&&<small>状态更新：{new Date(config.codex_subscription.updated_at*1000).toLocaleString()}</small>}
+        {config.codex_subscription.last_error&&<small>最近状态代码：{config.codex_subscription.last_error}</small>}
+        {config.codex_subscription.retry_at>0&&<small>下次尝试：{new Date(config.codex_subscription.retry_at*1000).toLocaleString()}</small>}
+      </section>}
       <UpstreamSettings modelIds={availableModels.map(m=>m.id)} assignments={config.assignments} upstreams={config.upstreams || []} onChange={changeUpstreams} onImported={setConfig} busy={busy} setBusy={setBusy} setStatus={setStatus} />
           <button type="button" className="settings-link" onClick={onOpenAssignments}>选择各功能使用的模型</button>
           <div className="settings-actions"><button disabled={busy} type="submit">{busy?"处理中…":"保存上游与模型"}</button></div>
@@ -133,7 +156,7 @@ export function ModelSettings({page,summaryRequest=0,onOpenPipeline,onOpenCatalo
           onChange={event=>setConfig(current=>({...current,dream:{...current.dream,main_prompt:event.target.value}}))}/>
         <small>作为梦境模型的背景设定，保存后下一次做梦生效。梦境写作规则会一同发送。</small></label></>}
           <button type="button" className="settings-link" onClick={onOpenCatalog}>管理上游与模型</button>
-      <label className="settings-toggle"><span><strong>启用 API Writer</strong><small>{config.features.narrative_tools?'已由主模型通过工具读写叙事卷，自动 Writer 已关闭。':'生成预览，确认保存后才写入叙事卷。使用自己的 Agent，可打开“配置”页的接入说明。'}</small></span><input type="checkbox" role="switch" disabled={config.features.narrative_tools} checked={config.upstream.writer_enabled} onChange={event=>option("writer_enabled",event.target.checked)} /></label>
+      <label className="settings-toggle"><span><strong>启用叙事卷 Writer</strong><small>{config.features.narrative_tools?'已由主模型通过工具读写叙事卷，自动 Writer 已关闭。':'生成预览，确认保存后才写入叙事卷。使用自己的 Agent，可打开“配置”页的接入说明。'}</small></span><input type="checkbox" role="switch" disabled={config.features.narrative_tools} checked={config.upstream.writer_enabled} onChange={event=>option("writer_enabled",event.target.checked)} /></label>
       <label className="settings-toggle"><span><strong>聊天时自动带入记忆</strong><small>{memoryAvailabilitySummary(config)}</small></span>
         <input type="checkbox" role="switch" disabled={!config.memory_ready} checked={config.upstream.memory_enabled} onChange={event=>option("memory_enabled",event.target.checked)} /></label>
       <div className="settings-group__heading"><h3>长文分段</h3></div>

@@ -36,7 +36,7 @@ export function AgentGuide({initial='event',label='如何接入 Agent'}) {
         <ol>
           <li>准备能以非交互方式运行的 Agent runner：从标准输入读取一份 JSON，读取其中的 <code>prompt</code>、<code>materials</code> 和 <code>output_schema</code>，标准输出只返回符合 schema 的 JSON；日志写入标准错误。叙事卷 Writer 只读文字，不加载原消息图片。</li>
           <li>在启动前端 Node 服务的环境中设置下方三个变量，替换模型名和 runner 的绝对路径，然后重启前端 Node 服务使环境变量生效。</li>
-          <li>设置页的“启用 API Writer”保持关闭，避免优先使用模型 API。在叙事卷里绑定材料，再选择更新或重写，现有预览入口就会调用这个 runner。</li>
+          <li>设置页的“启用叙事卷 Writer”保持关闭，避免优先使用所选任务模型。在叙事卷里绑定材料，再选择更新或重写，现有预览入口就会调用这个 runner。</li>
           <li>更新使用现有正文与新增材料；重写使用全部绑定材料。查看预览后明确保存，才会写入叙事卷。</li>
         </ol>
         <pre>{JSON.stringify(runner,null,2)}</pre>

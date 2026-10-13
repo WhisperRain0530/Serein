@@ -131,7 +131,8 @@ class BackgroundJobs:
         features = {'relations','narrative_revision','dreams'} if features is None else features
         from ..deployment import task_model
         from ..model_runtime import TaskClient
-        clients={'selected':TaskClient(settings.database,'relations')} if task_model(settings.database,'relations') else {}
+        clients=({'selected':TaskClient(settings.database,'relations')}
+                 if 'relations' in features and task_model(settings.database,'relations') else {})
         self.linker = SceneLinker(germany_config(settings),clients=clients) if 'relations' in features else None
         if self.linker:
             self.linker.proposal_store(create=True)

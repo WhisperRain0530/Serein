@@ -12,6 +12,7 @@ from ..recall.index import Search, tokens
 from ..adapters.embedding import EmbeddingClient
 from ..deployment import task_model
 from ..model_runtime import request_for, normalize_response
+from ..codex_config import is_codex_model
 from ..configured_models import effective_settings
 
 
@@ -63,13 +64,18 @@ def validate_creation(body):
 
 async def model_json(client, model, system, payload):
     options = {'reasoning_effort': 'low'} if model['model'].startswith('gpt-') else {}
-    url, headers, body = request_for(model, {'temperature': 0, 'stream': False,
+    request = {'temperature': 0, 'stream': False,
         **options,
         'messages': [{'role': 'system', 'content': system},
-                     {'role': 'user', 'content': json.dumps(payload, ensure_ascii=False)}]})
-    response = await client.post(url, headers=headers, json=body)
-    response.raise_for_status()
-    result = normalize_response(model, response.json())
+                     {'role': 'user', 'content': json.dumps(payload, ensure_ascii=False)}]}
+    if is_codex_model(model):
+        from ..model_runtime import complete
+        result = await complete(model, request)
+    else:
+        url, headers, body = request_for(model, request)
+        response = await client.post(url, headers=headers, json=body)
+        response.raise_for_status()
+        result = normalize_response(model, response.json())
     content = result['choices'][0]['message'].get('content') or ''
     content = re.sub(r'^```(?:json)?\s*|\s*```$', '', content.strip())
     result = json.loads(content)

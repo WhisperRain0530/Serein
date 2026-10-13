@@ -389,12 +389,14 @@ def routes(settings, services, auth):
             raise HTTPException(400,'Writer requires prompt and output_schema')
         if body.get('image_inputs'):
             raise HTTPException(400,'Narrative Writer accepts text materials only')
+        from ..codex_config import CODEX_TASK_TIMEOUT_SECONDS, is_codex_model
+        timeout = CODEX_TASK_TIMEOUT_SECONDS if is_codex_model(model) else 300
         try:
-            result=await asyncio.wait_for(complete({**model,'request_timeout_seconds':300},{'messages':[{'role':'user','content':body['prompt']}],
-                'response_format':{'type':'json_schema','json_schema':{'name':'narrative_preview','strict':True,'schema':body['output_schema']}}}),timeout=300)
+            result=await asyncio.wait_for(complete({**model,'request_timeout_seconds':timeout},{'messages':[{'role':'user','content':body['prompt']}],
+                'response_format':{'type':'json_schema','json_schema':{'name':'narrative_preview','strict':True,'schema':body['output_schema']}}}),timeout=timeout)
             return {'result':json.loads(result['choices'][0]['message']['content'])}
         except (httpx.TimeoutException,TimeoutError):
-            raise HTTPException(504,'Narrative Writer exceeded 5 minutes') from None
+            raise HTTPException(504,f'Narrative Writer exceeded {timeout // 60} minutes') from None
         except (httpx.HTTPError,ValueError,KeyError,IndexError,TypeError):
             raise HTTPException(502,'Writer returned an invalid result') from None
     return router

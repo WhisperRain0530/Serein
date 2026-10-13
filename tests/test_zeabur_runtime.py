@@ -134,7 +134,7 @@ def test_environment_uses_only_own_files_and_internal_loopback(tmp_path):
         assert Path(env[key]).is_relative_to(tmp_path)
 
 
-@pytest.mark.parametrize('port', ['wrong', '0', '65536', '8011', '4173'])
+@pytest.mark.parametrize('port', ['wrong', '0', '65536', '8011', '8012', '4173'])
 def test_invalid_or_internal_public_port_is_refused(port):
     with pytest.raises(ValueError, match='PORT'):
         runtime.gateway_port({'PORT':port})
@@ -236,6 +236,33 @@ def test_worker_exit_does_not_restart_chat_services(tmp_path, monkeypatch, capsy
     assert 'CODEX_HOME' not in launched[0][1]['env']
     assert Path(launched[2][1]['env']['CODEX_HOME']) == tmp_path / 'codex-worker' / 'auth'
     assert 'Chat remains available' in capsys.readouterr().out
+
+
+def test_task_service_uses_same_login_and_serial_lock_but_not_core_auth(tmp_path, monkeypatch):
+    launched = []
+    def launch(command, **options):
+        launched.append((command, options))
+        return Child()
+    class StopAfter:
+        count = 0
+        def wait(self, _seconds):
+            self.count += 1
+            return self.count >= 3
+    monkeypatch.setattr(runtime.subprocess, 'Popen', launch)
+    monkeypatch.setattr(runtime, 'wait_for_core', lambda *_:True)
+    assert runtime.supervise(tmp_path, StopAfter(), env={
+        'SEREIN_CODEX_WORKER_ENABLED':'1', 'SEREIN_CODEX_TASKS_ENABLED':'1',
+        'CODEX_HOME':'unrelated', 'OPENAI_API_KEY':'unrelated-secret',
+    }) == 0
+    assert len(launched) == 4
+    assert launched[3][0][1].endswith('codex_task_service.py')
+    assert launched[3][0][-1] == str(tmp_path / 'codex-tasks')
+    core_env, worker_env, task_env = [launched[i][1]['env'] for i in (0, 2, 3)]
+    assert 'CODEX_HOME' not in core_env and 'OPENAI_API_KEY' not in task_env
+    assert worker_env['CODEX_HOME'] == task_env['CODEX_HOME']
+    assert worker_env['SEREIN_CODEX_LOCK_FILE'] == task_env['SEREIN_CODEX_LOCK_FILE']
+    assert core_env['SEREIN_CODEX_TASK_TOKEN_FILE'] == task_env['SEREIN_AGENT_TOKEN_FILE']
+    assert core_env['SEREIN_CODEX_TASK_STATE_FILE'] == str(tmp_path / 'codex-tasks' / 'status.json')
 
 
 def test_status_redacts_diagnostics_and_does_not_accept_api_login(tmp_path, monkeypatch):

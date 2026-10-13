@@ -26,7 +26,10 @@ RUN pip install --no-cache-dir --no-deps --no-build-isolation . && pip check
 COPY --from=web /web ./web
 COPY scripts/zeabur_runtime.py ./scripts/zeabur_runtime.py
 COPY scripts/codex_event_worker.py ./scripts/codex_event_worker.py
+COPY scripts/codex_task_service.py ./scripts/codex_task_service.py
 COPY scripts/codex_event_smoke.py ./scripts/codex_event_smoke.py
+COPY scripts/codex_tasks_smoke.py ./scripts/codex_tasks_smoke.py
+COPY scripts/codex_tasks_writer_fixture.mjs ./scripts/codex_tasks_writer_fixture.mjs
 EXPOSE 8080
 HEALTHCHECK --interval=10s --timeout=5s --start-period=60s --retries=3 \
     CMD python /app/scripts/zeabur_runtime.py healthcheck

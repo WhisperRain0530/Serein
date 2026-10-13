@@ -17,6 +17,7 @@ from urllib.request import build_opener, ProxyHandler
 
 ROOT = Path(__file__).resolve().parents[1]
 MEMORY_PORT = 8011
+CODEX_TASK_PORT = 8012
 PREVIEW_PORT = 4173
 CODEX_AUTH_ENV = ('CODEX_HOME', 'CODEX_API_KEY', 'OPENAI_API_KEY', 'OPENAI_ACCESS_TOKEN',
                   'CODEX_ACCESS_TOKEN', 'OPENAI_BASE_URL')
@@ -96,7 +97,7 @@ def gateway_port(env):
         port = int(env.get('PORT') or '8080')
     except (TypeError, ValueError):
         raise ValueError('PORT must be a valid gateway port.') from None
-    if not 1 <= port <= 65535 or port in (MEMORY_PORT, PREVIEW_PORT):
+    if not 1 <= port <= 65535 or port in (MEMORY_PORT, CODEX_TASK_PORT, PREVIEW_PORT):
         raise ValueError('PORT must be 1–65535 and different from the internal service ports.')
     return port
 
@@ -112,6 +113,8 @@ def runtime_environment(data_dir, env):
     result.update(PYTHONUNBUFFERED='1', PYTHONUTF8='1',
         SEREIN_HTTP_TOKEN_FILE=str(data_dir / 'secrets' / 'api-token'),
         SEREIN_MEMORY_TOKEN_FILE=str(data_dir / 'secrets' / 'api-token'),
+        SEREIN_CODEX_TASK_TOKEN_FILE=str(data_dir / 'secrets' / 'api-token'),
+        SEREIN_CODEX_TASK_STATE_FILE=str(data_dir / 'codex-tasks' / 'status.json'),
         SEREIN_WEB_AUTH_FILE=str(data_dir / 'secrets' / 'web-auth.json'),
         SEREIN_MEMORY_URL=f'http://127.0.0.1:{MEMORY_PORT}',
         SEREIN_PREVIEW_PORT=str(PREVIEW_PORT),
@@ -136,6 +139,7 @@ def codex_environment(data_dir, env):
     result.update(CODEX_HOME=str(state / 'auth'),
                   SEREIN_AGENT_URL=f'http://127.0.0.1:{MEMORY_PORT}',
                   SEREIN_AGENT_TOKEN_FILE=str(Path(data_dir).resolve() / 'secrets' / 'api-token'),
+                  SEREIN_CODEX_LOCK_FILE=str(state / 'execution.lock'),
                   PYTHONUNBUFFERED='1', PYTHONUTF8='1')
     result.pop('SEREIN_AGENT_TOKEN', None)
     return result
@@ -213,12 +217,16 @@ def supervise(data_dir, stop, *, root=ROOT, env=None):
         if not wait_for_core(core, stop):
             return 0
         children.append(subprocess.Popen(commands[1], cwd=root, env=child_env))
-        worker = None
-        restart_after = 0.0
-        worker_enabled = source_env.get('SEREIN_CODEX_WORKER_ENABLED', '').lower() in ('1', 'true', 'yes')
-        worker_env = codex_environment(data_dir, source_env) if worker_enabled else None
-        worker_command = [sys.executable, str(root / 'scripts' / 'codex_event_worker.py'),
-                          '--state-dir', str(Path(data_dir).resolve() / 'codex-worker')]
+        optional = []
+        for flag, script, directory in (
+            ('SEREIN_CODEX_WORKER_ENABLED', 'codex_event_worker.py', 'codex-worker'),
+            ('SEREIN_CODEX_TASKS_ENABLED', 'codex_task_service.py', 'codex-tasks'),
+        ):
+            if source_env.get(flag, '').strip().lower() in ('1', 'true', 'yes'):
+                optional.append({'child':None, 'restart_after':0.0, 'name':directory,
+                    'env':codex_environment(data_dir, source_env),
+                    'command':[sys.executable, str(root / 'scripts' / script),
+                               '--state-dir', str(Path(data_dir).resolve() / directory)]})
         print('Serein started; connection credentials are available through the explicit credentials command.', flush=True)
         while not stop.wait(.25):
             for name, child in zip(('Memory', 'Gateway'), children[:2]):
@@ -226,14 +234,16 @@ def supervise(data_dir, stop, *, root=ROOT, env=None):
                 if code is not None:
                     print(f'{name} service exited; stopping this instance for restart.', file=sys.stderr, flush=True)
                     return 1
-            if worker_enabled:
-                if worker is not None and worker.poll() is not None:
-                    print('Codex worker stopped; retrying separately in 60 seconds. Chat remains available.', flush=True)
-                    worker = None
-                    restart_after = time.monotonic() + 60
-                if worker is None and time.monotonic() >= restart_after:
-                    worker = subprocess.Popen(worker_command, cwd=root, env=worker_env)
-                    children.append(worker)
+            for service in optional:
+                child = service['child']
+                if child is not None and child.poll() is not None:
+                    print(f"{service['name']} stopped; retrying separately in 60 seconds. Chat remains available.", flush=True)
+                    children.remove(child)
+                    service['child'] = None
+                    service['restart_after'] = time.monotonic() + 60
+                if service['child'] is None and time.monotonic() >= service['restart_after']:
+                    service['child'] = subprocess.Popen(service['command'], cwd=root, env=service['env'])
+                    children.append(service['child'])
         return 0
     finally:
         stop_children(children)

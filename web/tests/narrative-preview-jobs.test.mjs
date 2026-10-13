@@ -5,6 +5,8 @@ import config from "../vite.config.mjs";
 import { buildNarrativePreviewFingerprint } from "../server/narrativeMaterialPreview.mjs";
 import { createNarrativePreviewJobs } from "../server/narrativePreviewJobs.mjs";
 import { previewNarrativeRoll } from "../src/storage/narrativeStore.js";
+import { runNarrativeCodexTask } from "../server/narrativeCodexRunner.mjs";
+import { fileURLToPath } from "node:url";
 
 test("preview jobs return results, cap concurrent work, and expire", async (t) => {
   t.mock.method(console, "error", () => {});
@@ -62,6 +64,56 @@ test("completed preview retention starts when generation finishes", async () => 
   assert.equal(jobs.get(id), null);
 });
 
+test("only subscription previews extend the job deadline and still abort without publication", async (t) => {
+  t.mock.method(console,"error",()=>{});
+  t.mock.timers.enable({apis:['setTimeout']});
+  const jobs=createNarrativePreviewJobs();
+  let signal;
+  const id=jobs.start((value,setJobTimeout)=>{
+    signal=value;setJobTimeout(420_000);
+    return new Promise(()=>{});
+  });
+  await new Promise(resolve=>setImmediate(resolve));
+  t.mock.timers.tick(330_000);
+  assert.equal(signal.aborted,false);
+  assert.equal(jobs.get(id).timeoutMs,420_000);
+  t.mock.timers.tick(90_000);
+  assert.equal(signal.aborted,true);
+  assert.equal(jobs.get(id).result.statusCode,504);
+  assert.deepEqual(jobs.get(id).result.payload.writes_performed,[]);
+  assert.match(jobs.get(id).result.payload.message,/订阅任务/);
+});
+
+test("subscription Writer resolves the internal model and extends only its backend timeout",async()=>{
+  const roleDir=fileURLToPath(new URL('../codex_agents/narrative_writer/',import.meta.url));
+  const result={evidence_sufficient:true,body:'Synthetic preview',issues:[],self_review:{
+    source_bound:true,final_supported_versions:true,no_correction_narration:true,
+    material_relevance:true,no_new_inference:true,no_meta_explanation:true,
+    no_forced_closure:true,dates_preserved:true,identity_correct:true}};
+  for(const internal of [true,false]){
+    const model=internal?{id:'serein-codex-sol',model:'gpt-5.6-sol',transport:'codex_subscription'}
+      :{id:'external',model:'synthetic-api'};
+    const timeouts=[],deadlines=[],paths=[];
+    const backend=async(path,options,limits)=>{
+      paths.push(path);
+      if(path==='/v1/settings')return {ok:true,payload:{identity:{user_name:'Nori',ai_name:'Atlas'},
+        upstream:{writer_enabled:true},assignments:{writer:model.id},
+        available_models:internal?[]:[model],internal_models:internal?[model]:[]}};
+      timeouts.push(limits.timeout);
+      assert.equal(options.body.model,model.model);
+      return {ok:true,payload:{result}};
+    };
+    const preview=await runNarrativeCodexTask({mode:'rewrite',title:'Synthetic',materials:{content:'Synthetic evidence'},roleDir},
+      {backend,setJobTimeout:ms=>deadlines.push(ms)});
+    assert.deepEqual(timeouts,[internal?390_000:310_000]);
+    assert.deepEqual(deadlines,internal?[420_000]:[]);
+    assert.equal(preview.provider,model.model);
+    assert.equal(preview.publication_status,'not_published');
+    assert.deepEqual(preview.writes_performed,[]);
+    assert.deepEqual(paths,['/v1/settings','/v1/models/writer']);
+  }
+});
+
 test("narrative preview polls its job outside the original request", async (t) => {
   const requests = [];
   t.mock.method(globalThis, "setTimeout", (callback) => { queueMicrotask(callback); return 0; });
@@ -97,6 +149,23 @@ test("client polling has a deadline even when the service stays pending", async 
   });
   await assert.rejects(previewNarrativeRoll({id: "narrative_1"}, "rewrite", {}), /预览等待超时/);
   assert.equal(requests, 2);
+});
+
+test("subscription polling adopts the server's longer bounded deadline",async(t)=>{
+  const deadlines=[];
+  t.mock.method(Date,'now',()=>1000);
+  t.mock.method(AbortSignal,'timeout',milliseconds=>{deadlines.push(milliseconds);return new AbortController().signal;});
+  t.mock.method(globalThis,'setTimeout',callback=>{queueMicrotask(callback);return 0;});
+  let requests=0;
+  t.mock.method(globalThis,'fetch',async()=>{
+    requests++;
+    const payload=requests===1?{status:'pending',job_id:'subscription-job'}
+      :requests===2?{status:'pending',timeout_ms:450_000}:{status:'ok',body:'Synthetic preview'};
+    return new Response(JSON.stringify(payload),{status:requests<3?202:200});
+  });
+  assert.equal((await previewNarrativeRoll({id:'synthetic'},'rewrite',{})).body,'Synthetic preview');
+  assert.deepEqual(deadlines,[360_000,450_000]);
+  assert.equal(requests,3);
 });
 
 test("polling reports missing jobs and upstream timeouts without saving", async (t) => {

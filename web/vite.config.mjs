@@ -1151,7 +1151,7 @@ function sereinMemoryBridge() {
           const job = narrativePreviewJobs.get(jobId);
           response.statusCode = job ? (job.state === "pending" ? 202 : job.result.statusCode) : 404;
           response.end(JSON.stringify(job
-            ? (job.state === "pending" ? { status: "pending" } : job.result.payload)
+            ? (job.state === "pending" ? { status: "pending", ...(job.timeoutMs===420_000?{timeout_ms:450_000}:{}) } : job.result.payload)
             : { status: "error", reason: "preview_job_missing", message: "预览任务已中断，请重新预览。" }));
           return;
         }
@@ -1169,7 +1169,7 @@ function sereinMemoryBridge() {
             response.end(JSON.stringify({ status: "invalid", reason: "invalid_preview_request", writes_performed: [] }));
             return;
           }
-          const jobId = narrativePreviewJobs.start(async (signal) => {
+          const jobId = narrativePreviewJobs.start(async (signal,setJobTimeout) => {
             const upstream = await callSereinDashboard("/api/narrative-rolls/preview-input", {
               method: "POST",
               signal,
@@ -1206,7 +1206,7 @@ function sereinMemoryBridge() {
                   currentBody: input.current_body,
                   materials: input.materials,
                   roleDir: narrativeWriterRoleDir,
-                }, {signal});
+                }, {signal,setJobTimeout});
             if (!preview.body) {
               return { statusCode: mode === "edit" ? 400 : 200, payload: {
                 ...preview,

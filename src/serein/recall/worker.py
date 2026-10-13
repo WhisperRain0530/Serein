@@ -30,8 +30,11 @@ def update_pending(settings, *, client=None):
     from ..compat.entity_scope import update_scope
     entities=update_scope(settings)
     rebuild_entities(settings,legacy_rows=entities,document_ids=ids)
-    from ..deployment import task_model
-    if settings.embedding and settings.background.get('germany_config_file') and settings.recall.get('germany_policy_file') and not task_model(settings.database,'operit_tagging'):
+    from ..deployment import task_model, read_settings
+    from ..codex_config import CODEX_MODEL_ID
+    if (settings.embedding and settings.background.get('germany_config_file') and settings.recall.get('germany_policy_file')
+            and read_settings(settings.database)['assignments'].get('operit_tagging') != CODEX_MODEL_ID
+            and not task_model(settings.database,'operit_tagging')):
         import asyncio
         from .legacy_indexes import refresh
         report=asyncio.run(refresh(settings))

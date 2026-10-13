@@ -16,14 +16,25 @@ def germany_config(settings):
         role=Path(config['narrative_rolls']['scout_role_file'])
         if not role.is_absolute():
             config['narrative_rolls']['scout_role_file']=str((Path(filename).parent/role).resolve())
-    from ..deployment import identity, task_model
+    from ..deployment import identity, available_task_model, read_settings
+    from ..codex_config import CODEX_MODEL_ID, codex_tasks_enabled
     result={**config,'serein_database':str(settings.database), 'identity': identity(settings.database)}
-    selected=task_model(settings.database,'relations')
+    assignments=read_settings(settings.database)['assignments']
+    def available(task):
+        # Unrelated jobs must still load their configuration after a host disables
+        # the subscription service. Never fall back to a legacy API provider.
+        if assignments.get(task)==CODEX_MODEL_ID and not codex_tasks_enabled():
+            section='scene_linker' if task=='relations' else 'dream'
+            result[section]={**config.get(section,{}),'enabled':False,'auto_enabled':False,
+                             'models':[],'model':'','base_url':'','api_key':''}
+            return None
+        return available_task_model(settings.database,task)
+    selected=available('relations')
     if selected:
         result['scene_linker']={**config.get('scene_linker',{}),'enabled':True,'auto_enabled':True,
             'models':[{'name':'selected','model':selected['model'],'base_url':selected['base_url'],
                        'protocol':selected.get('protocol','openai'),'api_key':''}]}
-    selected=task_model(settings.database,'dreams')
+    selected=available('dreams')
     if selected:
         result['dream']={**config.get('dream',{}),'enabled':True,'auto_enabled':True,
             'model':selected['model'],'base_url':'','api_key':''}

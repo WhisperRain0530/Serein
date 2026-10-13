@@ -186,7 +186,8 @@ function projectLiveRoll(item, index, fallback) {
 }
 
 export async function previewNarrativeRoll(roll, mode, proposedMaterialIds, proposedBody = "") {
-  const signal = AbortSignal.timeout(360_000);
+  const startedAt=Date.now();
+  let signal = AbortSignal.timeout(360_000), subscriptionDeadline=false;
   try {
     let response = await fetch("/__serein/narrative-preview", {
       method: "POST",
@@ -213,6 +214,10 @@ export async function previewNarrativeRoll(roll, mode, proposedMaterialIds, prop
       const jobId = String(payload.job_id || "");
       if (!jobId) throw new Error("预览任务没有返回编号，请重新预览。");
       do {
+        if(payload.timeout_ms===450_000&&!subscriptionDeadline){
+          subscriptionDeadline=true;
+          signal=AbortSignal.timeout(Math.max(1,startedAt+450_000-Date.now()));
+        }
         await new Promise((resolve) => setTimeout(resolve, 2_000));
         signal.throwIfAborted();
         response = await fetch(`/__serein/narrative-preview?jobId=${encodeURIComponent(jobId)}`, {
