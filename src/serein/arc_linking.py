@@ -13,6 +13,7 @@ from .compat.events import project_events
 from .compat.narratives import Narratives
 from .core.store import Store, encode, now
 from .deployment import task_model
+from .codex_config import is_codex_model
 
 
 SYSTEM_PROMPT = """你只判断一条已经正式落库的 Event 是否属于某条已有 Arc。
@@ -99,9 +100,16 @@ async def _model_decision(settings,event,candidates,invoke_model=None):
     from .model_runtime import complete
     model=task_model(settings.database,'arc_linker')
     if not model:raise ValueError('请先选择 Event · Arc 归档模型')
+    response_format={'type':'json_object'}
+    if is_codex_model(model):
+        response_format={'type':'json_schema','json_schema':{'name':'arc_linker_decision','strict':True,
+            'schema':{'type':'object','properties':{
+                'action':{'type':'string','enum':['attach','unassigned']},
+                'arc_key':{'type':'string'},'reason':{'type':'string'}},
+                'required':['action','arc_key','reason'],'additionalProperties':False}}}
     response=await complete(model,{'messages':[{'role':'system','content':SYSTEM_PROMPT},
         {'role':'user','content':json.dumps(payload,ensure_ascii=False)}],
-        'response_format':{'type':'json_object'}})
+        'response_format':response_format})
     content=response['choices'][0]['message']['content']
     fenced=re.fullmatch(r'\s*```(?:json)?\s*\n?(.*?)\n?\s*```\s*',content,re.S|re.I)
     return normalize_decision(json.loads(fenced[1] if fenced else content),candidates)

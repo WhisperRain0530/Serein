@@ -1,4 +1,7 @@
 import asyncio
+import json
+
+import pytest
 
 from serein.arc_linking import candidate_arcs, enqueue, initialize, process
 from serein.bootstrap import initialize as bootstrap
@@ -63,3 +66,53 @@ def test_no_keyword_candidate_skips_model_and_leaves_event_unbound(tmp_path):
     assert result['status']=='unassigned'
     with Store(settings.database) as store:
         assert not store.conn.execute('SELECT 1 FROM fact_event_arc_links WHERE event_id=?',(event_id,)).fetchone()
+
+
+@pytest.mark.parametrize('internal', [True, False])
+def test_decision_format_is_explicit_only_for_subscription_and_preserves_messages(tmp_path, monkeypatch, internal):
+    from serein import arc_linking, model_runtime
+    from serein.codex_config import codex_model
+    # Frozen pre-change prompt: changing the transport contract must not rewrite it.
+    original_prompt = '''你只判断一条已经正式落库的 Event 是否属于某条已有 Arc。
+Arc 是长期主题、作品、项目或里程碑的材料目录，不是 Event 边界，也不是叙事正文。
+你只能阅读 Event 的标题、正文，以及程序先按关键词找到的 Arc 卡；不会提供聊天原话或叙事卷正文。
+只有 Event 的主要经历明确推进某条 Arc 时才能 attach。偶然提及、比喻、工具名、同一人物或泛泛相似都必须 unassigned。
+只能选择候选中的一个 arc_key；不得创建 Arc、修改 Event 或撰写叙事卷。只返回合法 JSON。'''
+    model = codex_model('arc_linker') if internal else {'id':'external-api', 'model':'synthetic-api'}
+    monkeypatch.setattr(arc_linking, 'task_model', lambda database, task: model)
+    event = {'id':'synthetic-event', 'title':'借书计划确认', 'body_md':'林岚和陈安计划周日三点借书，尚未成行。'}
+    candidates = [{'arc_key':'arc:synthetic-library', 'title':'借书计划'}]
+    expected = {'action':'attach','arc_key':'arc:synthetic-library','reason':'主要内容确认了既有借书计划。'}
+    seen = []
+    async def complete(selected, payload):
+        assert selected == model
+        seen.append(payload)
+        return {'choices':[{'message':{'content':json.dumps(expected,ensure_ascii=False)}}]}
+    monkeypatch.setattr(model_runtime, 'complete', complete)
+    assert asyncio.run(arc_linking._model_decision(Settings(tmp_path/'unused.db'), event, candidates)) == expected
+    assert seen[0]['messages'] == [
+        {'role':'system','content':original_prompt},
+        {'role':'user','content':json.dumps({'event':{'event_id':event['id'],'title':event['title'],
+            'body':event['body_md']},'candidate_arcs':candidates},ensure_ascii=False)}]
+    response_format = seen[0]['response_format']
+    if not internal:
+        assert response_format == {'type':'json_object'}
+    else:
+        assert response_format['type'] == 'json_schema'
+        assert response_format['json_schema']['strict'] is True
+        schema = response_format['json_schema']['schema']
+        assert set(schema['properties']) == set(schema['required']) == {'action','arc_key','reason'}
+        assert schema['additionalProperties'] is False
+        assert schema['properties']['action']['enum'] == ['attach','unassigned']
+        assert all(field['type'] == 'string' for field in schema['properties'].values())
+
+
+@pytest.mark.parametrize('output', [
+    {'decision':'attach','arc_key':'arc:synthetic-library'},
+    {'action':'attach','arc_key':'arc:synthetic-library','reason':''},
+    {'action':'attach','arc_key':'arc:unprovided','reason':'无此候选'},
+])
+def test_original_decision_validator_still_rejects_bad_shape_or_ungrounded_arc(output):
+    from serein.arc_linking import normalize_decision
+    with pytest.raises(ValueError):
+        normalize_decision(output, [{'arc_key':'arc:synthetic-library'}])
