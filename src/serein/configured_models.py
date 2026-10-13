@@ -5,6 +5,7 @@ import threading
 from dataclasses import replace
 from pathlib import Path
 from urllib.parse import urlsplit
+from .adapters.embedding import embedding_payload, embedding_profile_contract, embedding_vectors
 from .deployment import read_settings, task_model
 
 _prepare_lock = threading.Lock()
@@ -21,6 +22,7 @@ def model_index(settings, model):
     profile = {key:model.get(key) for key in ('id','model','base_url','dimension','query_instruction','document_instruction')}
     if model.get('tokenizer'):
         profile['tokenizer'] = model['tokenizer']
+    profile.update(embedding_profile_contract(model.get('base_url', '')))
     key = hashlib.sha256(json.dumps(profile,sort_keys=True).encode()).hexdigest()[:24]
     return settings.database.parent / 'model-indexes' / key
 
@@ -99,14 +101,19 @@ def prepare_selected(settings, *, before_fill=None):
         root=effective.index.parent;root.mkdir(parents=True,exist_ok=True)
         (root/'ready.json').unlink(missing_ok=True)
         # Discovery is explicit: clicking Prepare authorizes this provider request.
+        endpoint=model['base_url']+'/embeddings'
+        contract=embedding_profile_contract(endpoint)
         with httpx.Client(timeout=30,follow_redirects=False) as client:
-            response=client.post(model['base_url']+'/embeddings',json={'model':model['model'],'input':'dimension probe','encoding_format':'float'},
+            response=client.post(endpoint,json=embedding_payload(model['model'],'dimension probe',endpoint,
+                input_type='document',dimension=model.get('dimension')),
                 headers={'Authorization':'Bearer '+model['api_key']} if model.get('api_key') else {})
         if not response.is_success:raise ValueError(f'Embedding provider returned HTTP {response.status_code}')
-        dimension=len(response.json()['data'][0]['embedding'])
+        dimension=len(embedding_vectors(response.json(),model['model'],1,
+            require_positions=bool(contract))[0])
         if model.get('dimension') and model['dimension']!=dimension:raise ValueError('Configured dimension differs from the provider')
         profile={'model':model['model'],'provider_host':urlsplit(model['base_url']).hostname,'dimension':dimension,
-                 'document_instruction':model.get('document_instruction',''),'query_instruction':model.get('query_instruction',''),'max_chars':12000}
+                 'document_instruction':model.get('document_instruction',''),'query_instruction':model.get('query_instruction',''),'max_chars':12000,
+                 **contract}
         if not effective.index.exists():build_index(settings.database,effective.index)
         profile_file=root/'profile.json';profile_file.write_text(json.dumps(profile),'utf-8')
         prepared=prepare(effective,profile_file,_resources/'route-examples.json')

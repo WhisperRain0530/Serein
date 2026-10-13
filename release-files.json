@@ -309,6 +309,8 @@
   "tests/test_companion_wiring.py",
   "tests/test_diary_import.py",
   "tests/test_embedding.py",
+  "tests/test_voyage_embeddings.py",
+  "tests/test_voyage_reranker.py",
   "tests/test_entity_cooldown.py",
   "tests/test_event_handoff.py",
   "tests/test_event_import.py",

@@ -5,6 +5,11 @@ import os
 from urllib.parse import urlparse
 
 
+_VOYAGE_HOSTS = frozenset({
+    'api.voyageai.com', 'ai.mongodb.com', 'us.ai.mongodb.com', 'eu.ai.mongodb.com',
+})
+
+
 # SiliconFlow documents this separate field for these Qwen3 text rerankers.
 # Keep other provider/model request formats unchanged.
 _INSTRUCTION_MODELS = frozenset({
@@ -41,6 +46,7 @@ class RerankerClient:
             raise ValueError("Reranker endpoint must use HTTPS without embedded credentials")
         self.endpoint, self.model, self.api_key_env = endpoint, model, api_key_env
         self.api_key = api_key
+        self.voyage = url.hostname in _VOYAGE_HOSTS
         from .token_window import TokenWindow
         self.window = TokenWindow(tokenizer) if tokenizer else None
         self.instruction = (MEMORY_RELEVANCE_INSTRUCTION
@@ -104,8 +110,11 @@ class RerankerClient:
                 inputs.append(prepared);owners.append(doc['ref']);evidence.append(None)
         if not inputs:
             return RerankScores()
-        payload = {"model": self.model, "query": text, "documents":inputs,
-                   "top_n":len(inputs), "return_documents":False}
+        payload = {"model": self.model, "query": text, "documents":inputs}
+        if self.voyage:
+            payload.update(top_k=len(inputs), truncation=False)
+        else:
+            payload.update(top_n=len(inputs), return_documents=False)
         if self.instruction:
             payload['instruction'] = self.instruction
         owned = client is None
@@ -114,9 +123,20 @@ class RerankerClient:
             response = client.post(self.endpoint, json=payload, headers={"Authorization": f"Bearer {key}"} if key else {})
             if response.status_code != 200:
                 raise RerankerProviderError(f'http_{response.status_code}', f"Reranker provider returned HTTP {response.status_code}; response body omitted")
+            if self.voyage:
+                try:
+                    results = response.json()["data"]
+                except (ValueError, TypeError, KeyError):
+                    raise RerankerProviderError('invalid_response', "Reranker provider returned an invalid response") from None
+                if not isinstance(results, list) or any(
+                        not isinstance(item, dict) or 'index' not in item or 'relevance_score' not in item
+                        for item in results):
+                    raise RerankerProviderError('invalid_response', "Reranker provider returned an invalid response")
+            else:
+                results = response.json()["results"]
             scores = RerankScores()
             seen = set()
-            for item in response.json()["results"]:
+            for item in results:
                 index, score = item["index"], item["relevance_score"]
                 if type(index) is not int or not 0 <= index < len(inputs):
                     raise ValueError("Reranker returned an invalid document index")

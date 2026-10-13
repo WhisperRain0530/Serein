@@ -5,7 +5,7 @@ import re
 import sqlite3
 from pathlib import Path
 from urllib.parse import urlparse
-from .adapters.embedding import EmbeddingClient
+from .adapters.embedding import EmbeddingClient, embedding_profile_contract, validate_profile_contract
 
 
 def render_example(text, names):
@@ -17,10 +17,12 @@ def prepare(settings, profile_path, examples_path):
     profile=json.loads(Path(profile_path).read_text('utf-8'))
     dimension=profile.pop('dimension')
     required={'model','provider_host','document_instruction','query_instruction','max_chars'}
+    required.update(embedding_profile_contract(settings.embedding['endpoint']))
     if set(profile)!=required or type(dimension) is not int or dimension<1:
         raise ValueError('Provide complete embedding profile and positive dimension')
     if urlparse(settings.embedding['endpoint']).hostname != profile['provider_host']:
         raise ValueError('Profile provider_host must match embedding endpoint')
+    validate_profile_contract(profile, settings.embedding['endpoint'])
     with sqlite3.connect(settings.index) as conn:
         existing=dict(conn.execute("SELECT key,value FROM settings WHERE key LIKE 'embedding_%'"))
         proposed={'embedding_profile':json.dumps(profile),'embedding_dimension':json.dumps(dimension)}
