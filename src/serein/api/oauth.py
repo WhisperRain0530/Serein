@@ -20,7 +20,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urlsplit, urlunsplit
 
 from fastapi import APIRouter, Request
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 
 
 SCOPE = "serein:mcp"
@@ -434,7 +434,16 @@ def routes(database: Path, gateway_key: str) -> tuple[APIRouter, OAuthStore]:
             location = _append_query(params["redirect_uri"], {"code": code, "state": params["state"]})
         except ValueError as exc:
             return _oauth_error("invalid_request", str(exc))
-        return RedirectResponse(location, status_code=303, headers={"Cache-Control": "no-store"})
+        # End the form submission before navigating to the client. Chromium also
+        # applies the original form-action policy to a POST's redirect chain.
+        page = f"""<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width"><title>返回客户端完成连接</title></head>
+<body><main><h1>授权已确认</h1><p>点击下方链接返回客户端，完成连接。</p>
+<p><a id="oauth-return" href="{html.escape(location, quote=True)}" rel="noreferrer">继续返回 {html.escape(params['client_name'])}</a></p>
+</main></body></html>"""
+        return HTMLResponse(page, headers={"Cache-Control": "no-store", "Pragma": "no-cache",
+            "Content-Security-Policy": "default-src 'none'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+            "Referrer-Policy": "no-referrer", "X-Content-Type-Options": "nosniff"})
 
     @router.post("/token")
     async def token_endpoint(request: Request):

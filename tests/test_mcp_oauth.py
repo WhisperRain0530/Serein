@@ -1,5 +1,6 @@
 import base64
 import hashlib
+from html.parser import HTMLParser
 from urllib.parse import parse_qs, urlsplit
 
 from fastapi.testclient import TestClient
@@ -11,6 +12,23 @@ from serein.core import Store
 
 def _challenge(verifier):
     return base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b'=').decode()
+
+
+class _ConsentPage(HTMLParser):
+    def __init__(self, text):
+        super().__init__()
+        self.elements = []
+        self.feed(text)
+
+    def handle_starttag(self, tag, attrs):
+        self.elements.append((tag, dict(attrs)))
+
+    def callback(self):
+        links = [attrs for tag, attrs in self.elements
+                 if tag == 'a' and attrs.get('id') == 'oauth-return']
+        assert len(links) == 1
+        assert links[0]['rel'] == 'noreferrer'
+        return links[0]['href']
 
 
 def _authorize(client, registration, *, state='exact-state', resource='https://memory.example/serein/mcp'):
@@ -26,8 +44,11 @@ def _authorize(client, registration, *, state='exact-state', resource='https://m
     assert 'synthetic-gateway-key' not in page.text
     consent = client.post('/authorize', data={**params, 'gateway_key':'synthetic-gateway-key'},
                           follow_redirects=False)
-    assert consent.status_code == 303
-    callback = urlsplit(consent.headers['location'])
+    assert consent.status_code == 200
+    assert 'location' not in consent.headers
+    assert 'synthetic-gateway-key' not in consent.text
+    assert consent.headers['content-security-policy'] == page.headers['content-security-policy']
+    callback = urlsplit(_ConsentPage(consent.text).callback())
     values = parse_qs(callback.query)
     assert values['state'] == [state]
     return values['code'][0], verifier, params
@@ -140,11 +161,14 @@ def test_oauth_rejects_open_redirect_bad_key_and_replayed_code(tmp_path):
             'resource':'https://memory.example/serein/mcp'}
         mismatch = client.get('/authorize', params=params)
         assert mismatch.status_code == 400 and 'redirect_uri' in mismatch.text
+        mismatch_submit = client.post('/authorize', data={**params, 'gateway_key':'synthetic-gateway-key'})
+        assert mismatch_submit.status_code == 400 and 'oauth-return' not in mismatch_submit.text
 
         params['redirect_uri'] = registration['redirect_uris'][0]
         wrong_key = client.post('/authorize', data={**params, 'gateway_key':'wrong'},
                                 follow_redirects=False)
         assert wrong_key.status_code == 401 and 'synthetic-gateway-key' not in wrong_key.text
+        assert 'oauth-return' not in wrong_key.text
 
         code, correct_verifier, valid = _authorize(client, registration)
         wrong_pkce = client.post('/token', data={
@@ -159,6 +183,52 @@ def test_oauth_rejects_open_redirect_bad_key_and_replayed_code(tmp_path):
             'resource':valid['resource'],
         })
         assert replay.status_code == 400 and replay.json()['error'] == 'invalid_grant'
+
+
+def test_oauth_consent_ends_post_with_escaped_link_and_unchanged_csp(tmp_path):
+    settings = Settings(tmp_path/'memory.db')
+    with Store(settings.database):
+        pass
+    with TestClient(create_app(settings, token='synthetic-gateway-key'),
+                    base_url='https://memory.example') as client:
+        redirect = 'https://chatgpt.com/connector/oauth/synthetic?mode=link&return=%2Fchat'
+        registration = client.post('/register', json={
+            'client_name':'ChatGPT"><script>unexpected()</script>', 'redirect_uris':[redirect],
+        }).json()
+        verifier = 'v' * 43
+        state = '<synthetic & "state">'
+        params = {'response_type':'code', 'client_id':registration['client_id'],
+            'redirect_uri':redirect, 'state':state, 'code_challenge':_challenge(verifier),
+            'code_challenge_method':'S256', 'resource':'https://memory.example/serein/mcp'}
+        initial = client.get('/authorize', params=params)
+        consent = client.post('/authorize', data={**params, 'gateway_key':'synthetic-gateway-key'},
+                              follow_redirects=False)
+        assert consent.status_code == 200 and 'location' not in consent.headers
+        assert consent.headers['content-security-policy'] == initial.headers['content-security-policy'] == (
+            "default-src 'none'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'")
+        assert consent.headers['cache-control'] == 'no-store'
+        assert consent.headers['pragma'] == 'no-cache'
+        assert consent.headers['referrer-policy'] == 'no-referrer'
+        assert consent.headers['x-content-type-options'] == 'nosniff'
+        page = _ConsentPage(consent.text)
+        assert not {'script','form','input','iframe'} & {tag for tag, _attrs in page.elements}
+        assert not any('http-equiv' in attrs for _tag, attrs in page.elements)
+        assert 'synthetic-gateway-key' not in consent.text
+        assert 'ChatGPT&quot;&gt;&lt;script&gt;unexpected()&lt;/script&gt;' in consent.text
+        assert '&amp;return=' in consent.text and '&amp;code=' in consent.text
+        callback = urlsplit(page.callback())
+        assert (callback.scheme, callback.netloc, callback.path) == (
+            'https', 'chatgpt.com', '/connector/oauth/synthetic')
+        query = parse_qs(callback.query)
+        assert set(query) == {'mode','return','code','state'}
+        assert query['mode'] == ['link'] and query['return'] == ['/chat']
+        assert query['state'] == [state]
+        # The link carries only the original callback query and the PKCE-bound
+        # authorization code/state; the submitted Gateway Key is never forwarded.
+        grant = client.post('/token', data={'grant_type':'authorization_code',
+            'client_id':registration['client_id'], 'redirect_uri':redirect,
+            'code':query['code'][0], 'code_verifier':verifier, 'resource':params['resource']})
+        assert grant.status_code == 200
 
 
 def test_oauth_registration_cap_evicts_unused_clients_and_public_http_is_refused(tmp_path, monkeypatch):
