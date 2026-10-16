@@ -190,6 +190,70 @@ def test_writer_scope_is_never_expanded_with_images(tmp_path):
         worker.frozen_input(item, tmp_path)
 
 
+def pretranscribed_task():
+    item = task('event_curator')
+    item['request'].update(pretranscribed=True, identity={}, curator_image_transcriptions=[
+        {'source_message_id': 1, 'position': position, 'sha256': str(position) * 64,
+         'evidence_role': 'owned', 'text': f'Synthetic page {position}', 'unreadable': False}
+        for position in (1, 2)])
+    return item
+
+
+@pytest.mark.parametrize('change', ['text', 'whitespace', 'source', 'position', 'sha256',
+                                  'evidence_role', 'unreadable', 'boolean_as_number',
+                                  'number_as_boolean', 'number_as_float', 'order',
+                                  'missing_item', 'extra_item', 'missing_field', 'extra_field'])
+def test_curator_echo_must_match_every_original_receipt_field_and_order(change):
+    from serein.extensions.pipeline import validate
+    item = pretranscribed_task()
+    echoed = copy.deepcopy(item['request']['curator_image_transcriptions'])
+    if change == 'text': echoed[0]['text'] = 'Invented page'
+    elif change == 'whitespace': echoed[0]['text'] += ' '
+    elif change == 'source': echoed[0]['source_message_id'] = 2
+    elif change == 'position': echoed[0]['position'] = 2
+    elif change == 'sha256': echoed[0]['sha256'] = 'f' * 64
+    elif change == 'evidence_role': echoed[0]['evidence_role'] = 'context_only'
+    elif change == 'unreadable': echoed[0]['unreadable'] = True
+    elif change == 'boolean_as_number': echoed[0]['unreadable'] = 0
+    elif change == 'number_as_boolean': echoed[0]['source_message_id'] = True
+    elif change == 'number_as_float': echoed[0]['position'] = 1.0
+    elif change == 'order': echoed.reverse()
+    elif change == 'missing_item': echoed.pop()
+    elif change == 'extra_item': echoed.append(copy.deepcopy(echoed[0]))
+    elif change == 'missing_field': echoed[0].pop('sha256')
+    elif change == 'extra_field': echoed[0]['input_image'] = 1
+    result = {'image_transcriptions': echoed}
+    original = copy.deepcopy((item, result))
+    assert worker.normalize_curator_transcription_echo(item, result) is result
+    with pytest.raises(ValueError, match='每张输入图片必须恰有一份'):
+        validate(item['request'], result)
+    assert (item, result) == original
+
+
+@pytest.mark.parametrize('change', ['pretranscribed_false', 'pretranscribed_missing',
+                                  'pretranscribed_number', 'transcription_only',
+                                  'images_missing', 'images_present', 'other_role', 'role_mismatch'])
+def test_curator_echo_normalization_does_not_expand_to_other_task_shapes(change):
+    item = pretranscribed_task()
+    result = {'image_transcriptions': copy.deepcopy(item['request']['curator_image_transcriptions'])}
+    request = item['request']
+    if change == 'pretranscribed_false': request['pretranscribed'] = False
+    elif change == 'pretranscribed_missing': request.pop('pretranscribed')
+    elif change == 'pretranscribed_number': request['pretranscribed'] = 1
+    elif change == 'transcription_only': request['transcription_only'] = True
+    elif change == 'images_missing': request.pop('images')
+    elif change == 'images_present': request['images'] = [{'synthetic': True}]
+    elif change == 'other_role': item['role'] = request['role'] = 'event_writer'
+    elif change == 'role_mismatch': item['role'] = 'track_router'
+    original = copy.deepcopy((item, result))
+    assert worker.normalize_curator_transcription_echo(item, result) is result
+    assert (item, result) == original
+    if change.startswith('pretranscribed_'):
+        from serein.extensions.pipeline import validate
+        with pytest.raises(ValueError, match='每张输入图片必须恰有一份'):
+            validate(request, result)
+
+
 class FakeClient:
     def __init__(self, replies):
         self.replies, self.calls = iter(replies), []
@@ -340,4 +404,72 @@ def test_real_synthetic_pipeline_is_drained_and_settled(settings, tmp_path):
     assert roles == ['track_router', 'event_curator', 'event_writer']
     with Store(settings.database, read_only=True) as store:
         assert store.conn.execute('SELECT count(*) FROM raw_processing').fetchone()[0] == 2
+    assert not agent.outbox.exists()
+
+
+def test_pretranscribed_curator_echo_settles_same_job_without_changing_host_evidence(settings, tmp_path):
+    """Real Router/image/Curator/Writer contracts with only the model replaced."""
+    from serein.compat.raw_archive import raw_archive
+    from serein.core.store import Store
+    from serein.extensions import pipeline
+    from test_event_handoff import PNG
+    second_png = 'data:image/png;base64,' + base64.b64encode(
+        base64.b64decode(PNG.split(',', 1)[1]) + b'synthetic-second-page').decode()
+    raw_archive(settings).ingest([
+        {'source_event_id': 'pages', 'session_id': 'synthetic', 'role': 'user',
+         'text': 'Library plan', 'created_at': '2025-01-01T00:00:00Z',
+         'metadata': {'attachments': [{'kind': 'image', 'url': url} for url in (PNG, second_png)]}},
+        {'source_event_id': 'reply', 'session_id': 'synthetic', 'role': 'assistant',
+         'text': 'Agreed to the library plan', 'created_at': '2025-01-01T00:01:00Z'}], source='synthetic')
+    captured = {}
+    class LocalClient:
+        def scheduled_ready(self, timestamp, *, manual=False):
+            return True
+
+        def call(self, name, payload):
+            if name == 'pipeline_next':
+                return asyncio.run(pipeline.advance(settings.database, **payload))
+            if payload['job_id'] == captured.get('job_id'):
+                assert payload['output'] == captured['decision']
+                assert 'image_transcriptions' not in payload['output']
+                with Store(settings.database, read_only=True) as store:
+                    assert store.conn.execute('SELECT request_json FROM pipeline_jobs WHERE id=?',
+                        (payload['job_id'],)).fetchone()[0] == captured['frozen_request']
+            return pipeline.submit(settings.database, **payload)
+
+    def run(item):
+        request = item['request']
+        if request.get('transcription_only'):
+            position = request['images'][0]['position']
+            return {'image_transcriptions': [{'input_image': 1,
+                'text': f'Synthetic page {position}', 'unreadable': False}]}
+        result = output_for(item['role'], request)
+        if item['role'] == 'event_curator':
+            assert request['pretranscribed'] is True and request['images'] == []
+            assert len(request['curator_image_transcriptions']) == 2
+            captured.update(job_id=item['job_id'], task=item, original_task=copy.deepcopy(item),
+                            decision=copy.deepcopy(result))
+            result['image_transcriptions'] = copy.deepcopy(request['curator_image_transcriptions'])
+            captured.update(raw_result=result, original_result=copy.deepcopy(result))
+            with Store(settings.database, read_only=True) as store:
+                captured['cache'] = store.conn.execute(
+                    'SELECT image_transcription_json FROM raw_events WHERE id=1').fetchone()[0]
+                captured['frozen_request'] = store.conn.execute(
+                    'SELECT request_json FROM pipeline_jobs WHERE id=?', (item['job_id'],)).fetchone()[0]
+        elif item['role'] == 'event_writer':
+            assert request['curator_image_transcriptions'] == [
+                {**row, 'evidence_role': 'owned'}
+                for row in captured['original_task']['request']['curator_image_transcriptions']]
+        return result
+
+    agent = worker.Worker(LocalClient(), SimpleNamespace(model=worker.DEFAULT_MODEL, run=run), tmp_path)
+    assert agent.run(once=True, include_recent=True) == 0
+    assert captured['task'] == captured['original_task']
+    assert captured['raw_result'] == captured['original_result']
+    with Store(settings.database, read_only=True) as store:
+        assert store.conn.execute('SELECT image_transcription_json FROM raw_events WHERE id=1').fetchone()[0] == captured['cache']
+        assert store.conn.execute("SELECT count(*) FROM documents WHERE kind='event'").fetchone()[0] == 1
+        assert store.conn.execute('SELECT count(*) FROM raw_processing').fetchone()[0] == 2
+        assert json.loads(store.conn.execute('SELECT output_json FROM pipeline_jobs WHERE id=?',
+            (captured['job_id'],)).fetchone()[0]) == captured['decision']
     assert not agent.outbox.exists()

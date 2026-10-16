@@ -202,6 +202,30 @@ def frozen_input(task, directory):
     return text, attachments
 
 
+def normalize_curator_transcription_echo(task, result):
+    """Discard only an exact echo of the host's already bound image receipts."""
+    request = task.get('request')
+    if (task.get('role') != 'event_curator' or not isinstance(request, dict)
+            or request.get('role') != 'event_curator'
+            or request.get('pretranscribed') is not True or request.get('images') != []
+            or request.get('transcription_only') or not isinstance(result, dict)):
+        return result
+    echoed = result.get('image_transcriptions')
+    original = request.get('curator_image_transcriptions')
+    if not isinstance(echoed, list) or not isinstance(original, list):
+        return result
+    # JSON comparison preserves array order and distinguishes booleans/numbers;
+    # ordinary Python equality would accept False == 0 and source ID 1 == True.
+    try:
+        same = json.dumps(echoed, sort_keys=True, allow_nan=False) == json.dumps(
+            original, sort_keys=True, allow_nan=False)
+    except (TypeError, ValueError):
+        return result
+    if not same:
+        return result
+    return {key: value for key, value in result.items() if key != 'image_transcriptions'}
+
+
 def codex_command(executable, model, directory, output, attachments):
     if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}', model):
         raise WorkerError('invalid_model')
@@ -476,6 +500,7 @@ class Worker:
                 raise WorkerError('pipeline_attention_required', retry_after=3600)
             self.status('working')
             result = self.runner.run(task)
+            result = normalize_curator_transcription_echo(task, result)
             private_write(self.outbox, {'job_id': task['job_id'], 'output': result})
         pending = strict_json(self.outbox.read_bytes())
         if (not isinstance(pending, dict) or set(pending) != {'job_id', 'output'}
